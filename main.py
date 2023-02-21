@@ -2,6 +2,7 @@
 import argparse
 import ipaddress
 import logging
+logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 import threading
 import time
 import concurrent.futures
@@ -24,6 +25,7 @@ class Equipo:
         self.ttl = 0
         self.puertos = []
         self.so = ""
+        self.firewalled = False
 
     def __hash__(self):
         return hash(self.ip)
@@ -35,21 +37,10 @@ class Equipo:
         self.puertos.append(port)
     def setUp(self):
         self._up = True
+    def setDown(self):
+        self._up = False
     def getUP(self):
         return self._up
-    def arp_scan(self, ifaz, tout):
-        # Se emiten los paquetes a broadcast a traves de la interfaz indicada
-        print(
-            'Se emiten paquetes ARP a traves de la interfaz {0} preguntando su dominio de broadcast por las IP solicitadas '
-            .format(ifaz))
-        print("se escanea el target:{0}".format(str(self.ip)))
-        ans, unans = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=str(self.ip)), iface=ifaz, timeout=tout,
-                         verbose=0)
-        # ans.summary(lambda s,r: r.sprintf("%Ether.src% %ARP.psrc%") )
-        for i in ans:
-            # print("{0} esta arriba".format(i[1].psrc))
-            self.setUp()
-            self.mac = i[1].hwsrc
 
     @property
     def ip(self):
@@ -112,15 +103,11 @@ class Puerto:
             raise TypeError("El estado debe ser open, close, filtered")
         self.estado = value'''
 
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press Ctrl+F8 to toggle the breakpoint.
-
-
+'''
 # simple progress indicator callback function
 def progress_indicator(future):
     print('.', end='', flush=True)
-
+'''
 
 def get_interfaces():
     interfaces = []
@@ -153,107 +140,6 @@ def get_default_range():
     return rango.exploded
 
 
-def arpping(ifaz, target, tout):
-    # Se emiten los paquetes a broadcast a traves de la interfaz indicada
-    #print(
-    #    'Se emiten paquetes ARP a traves de la interfaz {0} preguntando su dominio de broadcast por las IP solicitadas '
-    #    .format(ifaz))
-    #for target in targets:
-    #print("se escanea el target:{0}".format(str(target.ip)))
-    ans = srp1(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=str(target.ip)), iface=ifaz, timeout=tout, verbose=0)
-    # ans.summary(lambda s,r: r.sprintf("%Ether.src% %ARP.psrc%") )
-    if ans is not None:
-        target.setUp()
-        target.mac = ans.hwsrc
-    return target
-
-
-def icmpping(ifaz, target, tout):
-    conf.verb = -1  # para evitar mensajes de warning de scapy
-    ans = srp1(Ether()/IP(dst=str(target.ip))/ICMP(), iface=ifaz, timeout=tout, verbose=0)
-    conf.verb = 1  # para evitar mensajes de warning de scapy
-    if ans is not None:
-        target.setUp()
-        target.ttl = ans.ttl
-        target.mac = ans.src
-    return target
-
-def ping(host):
-    # Enviamos un paquete ICMP a la dirección IP del host
-    packet = IP(dst=host)/ICMP()
-    reply = sr1(packet, timeout=1, verbose=0)
-    # Si recibimos una respuesta, imprimimos la dirección IP del host
-    if reply is not None:
-        print(f'{host} is up')
-
-def arp_scan2(arguments):
-    iface = arguments[0]
-    target = arguments[1]
-    tout = arguments[2]
-
-    ans, unans = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=str(target.ip)), iface=iface, timeout=tout, verbose=0)
-    # ans.summary(lambda s,r: r.sprintf("%Ether.src% %ARP.psrc%") )
-    for i in ans:
-        #print("{0} esta arriba".format(i[1].psrc))
-        target.setUp()
-        target.mac = i[1].hwsrc
-
-def tcp_connect_scan2(target, dst_port, tout):
-    src_port = RandShort()
-    #response = sr1(IP(dst=str(target.ip))/TCP(sport=src_port,dport=int(dst_port.numero),flags="S"), timeout=tout, verbose=0)
-    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="S"), timeout=tout, verbose=0)
-    if(str(type(response))=="<class 'NoneType'>"):
-        #dst_port.estado = "closed"
-        pass
-    elif(response.haslayer(TCP)):
-        if(response.getlayer(TCP).flags == 0x12):
-            # este lo manda el SSOO
-            #send_rst = sr1(IP(dst=str(target.ip))/TCP(sport=src_port,dport=int(dst_port.numero),flags="AR"), timeout=tout, verbose=0)
-            send_rst = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="R"),
-                           timeout=tout, verbose=0)
-            #dst_port.estado = "open"
-            #target.add_port(copy(dst_port))
-            print("paquete {0} open.".format(response.summary()))
-            target.add_port(Puerto(dst_port, 'tcp'))
-        elif(response.getlayer(TCP).flags == 0x14):
-            #dst_port.estado = "closed"
-            pass
-    return target
-
-
-def tcpping(target, dst_port, tout):
-    src_port = RandShort()
-    conf.verb = -1 # para evitar mensajes de warning de scapy
-    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="S"), timeout=tout, verbose=0)
-    if response is not None:
-        if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x12:
-            target.setUp()
-            #print(f"[+] Port {port} is open on {ip}")
-            new_port=Puerto(dst_port, 'tcp')
-            new_port.estado='open'
-            target.add_port(new_port)
-            response_packet = sr1(IP(dst=str(target.ip))/TCP(sport=src_port, dport=port, flags="R"), timeout=tout, verbose=0)
-        else:
-            pass
-    conf.verb = 1 # restablecemos los mensajes de warning de scapy
-    return target
-
-
-def tcp_connect_scan_orig(targets, dst_ports):
-    src_port = RandShort()
-    for target in targets:
-        for dst_port in dst_ports:
-            response = sr1(IP(dst=str(target.ip))/TCP(src_port=src_port,dport=int(dst_port),flags="S"))
-            if(str(type(response)=="<type 'NoneType'>")):
-                print(dst_port+": Port Closed")
-            elif(response.haslayer(TCP)):
-                if(response.getlayer(TCP).flags == 0x12):
-                    send_rst = sr1(IP(dst=dst_ip)/TCP(sport=src_port,dport=int(dst_port),flags="AR"))
-                    print(dst_port+": Port Open")
-                elif(response.getlayer(TCP).flags == 0x14):
-                    print(dst_port+": Port Closed")
-    return targets
-
 def set_targets(rango):
     """
     función para crear una lista de obtjetos tipo 'equipos'.
@@ -285,7 +171,6 @@ def set_targets(rango):
     return targets
 
 
-
 def set_ports(rango_puertos, tipo):
     """
     función para crear una lista de obtjetos tipo 'Puertos'.
@@ -307,7 +192,7 @@ def set_ports(rango_puertos, tipo):
             if '-' in i:
                 puerto_inicial = 1 if i.split('-')[0] == '' else i.split('-')[0]
                 puerto_final = 65535 if i.split('-')[1] == '' else i.split('-')[1]
-                for puerto in range(int(puerto_inicial),int(puerto_final)):
+                for puerto in range(int(puerto_inicial),int(puerto_final)+1):
                     target_ports.add(Puerto(puerto, tipo))
                     raw_ports.add(puerto)
             else:
@@ -318,26 +203,132 @@ def set_ports(rango_puertos, tipo):
     return target_ports, raw_ports
 
 
-
-# Definimos una función que selecciona y ejecuta una función en función del parámetro de entrada
-def seleccionar_funcion(nombre_funcion):
-    # Buscamos la función correspondiente en el diccionario
-    funcion = funciones.get(nombre_funcion)
-    # Si la función existe, la ejecutamos
-    if funcion is not None:
-        funcion()
-    else:
-        print(f"La función {nombre_funcion} no existe")
-
-
 def handler(signal, frame):
     print("[!] Ctrl+c pulsado, saliendo del script")
     exit(1)
 
 #dispatch table
 # Definimos una serie de funciones
-def udpping():
-    print("Has seleccionado la función 1")
+def arpping(ifaz, target, tout):
+    # Se emiten los paquetes a broadcast a traves de la interfaz indicada
+    #print(
+    #    'Se emiten paquetes ARP a traves de la interfaz {0} preguntando su dominio de broadcast por las IP solicitadas '
+    #    .format(ifaz))
+    #for target in targets:
+    #print("se escanea el target:{0}".format(str(target.ip)))
+    ans = srp1(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=str(target.ip)), iface=ifaz, timeout=tout, verbose=0)
+    # ans.summary(lambda s,r: r.sprintf("%Ether.src% %ARP.psrc%") )
+    if ans is not None:
+        target.setUp()
+        target.mac = ans.hwsrc
+    return target
+
+
+def icmpping(ifaz, target, tout):
+    ans = srp1(Ether()/IP(dst=str(target.ip))/ICMP(), iface=ifaz, timeout=tout, verbose=0)
+    if ans is not None:
+        #print(f"[+] el equipo {str(target.ip)} esta arriba")
+        target.setUp()
+        target.ttl = ans.ttl
+        target.mac = ans.src
+    return target
+
+
+def tcp_connect_scan2(target, dst_port, tout):
+    src_port = RandShort()
+    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="S"), timeout=tout, verbose=0)
+    if(str(type(response))=="<class 'NoneType'>"):
+        #dst_port.estado = "closed"
+        pass
+    elif(response.haslayer(TCP)):
+        if(response.getlayer(TCP).flags == 0x12):
+            # este lo manda el SSOO
+            #send_rst = sr1(IP(dst=str(target.ip))/TCP(sport=src_port,dport=int(dst_port.numero),flags="AR"), timeout=tout, verbose=0)
+            send_rst = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="R"),
+                           timeout=tout, verbose=0)
+            #dst_port.estado = "open"
+            #target.add_port(copy(dst_port))
+            print("paquete {0} open.".format(response.summary()))
+            target.add_port(Puerto(dst_port, 'tcp'))
+        elif(response.getlayer(TCP).flags == 0x14):
+            #dst_port.estado = "closed"
+            pass
+    return target
+
+
+def tcpping(target, dst_port, tout):
+    src_port = RandShort()
+    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="S"), timeout=tout, verbose=0)
+    if response is not None:
+        if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x12:
+            target.setUp()
+            new_port=Puerto(dst_port, 'tcp')
+            new_port.estado='open'
+            target.add_port(new_port)
+            response_packet = sr1(IP(dst=str(target.ip))/TCP(sport=src_port, dport=port, flags="R"), timeout=tout, verbose=0)
+        else:
+            pass
+    return target
+
+
+def tcpstealthscan(target, dst_port, tout):
+    src_port = RandShort()
+    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="S"), timeout=tout, verbose=0)
+    if response is not None:
+        if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x12:
+            target.setUp()
+            #print(f"[+] Port {port} is open on {ip}")
+            new_port=Puerto(dst_port, 'tcp')
+            new_port.estado='open'
+            target.add_port(new_port)
+            response_packet = sr1(IP(dst=str(target.ip))/TCP(sport=src_port, dport=port, flags="R"), timeout=tout, verbose=0)
+        elif response.haslayer(ICMP):
+            if(int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]):
+                new_port = Puerto(dst_port, 'tcp')
+                new_port.estado = 'filtered'
+                target.add_port(new_port)
+    else:
+        new_port=Puerto(dst_port, 'tcp')
+        new_port.estado='filtered'
+        target.add_port(new_port)
+    return target
+
+
+def udpping(target, dst_port, tout):
+    src_port = RandShort()
+    response = sr1(IP(dst=str(target.ip)) / UDP(sport=src_port, dport=dst_port), timeout=tout, verbose=0)
+
+    # Analiza la respuesta
+    if response is None:
+        retrans=[]
+        for count in range(0,3):
+            retrans.append(sr1(IP(dst=str(target.ip))/UDP(sport=src_port, dport=dst_port), timeout=tout, verbose=0))
+            for item in retrans:
+                if (item.haslayer(UDP)):
+                    new_port = Puerto(dst_port, 'udp')
+                    new_port.estado = 'open'
+                    target.add_port(new_port)
+                    target.setUp()
+                elif (item.haslayer(ICMP)):
+                    if(int(item.getlayer(ICMP).type)==3) and int(item.getlayer(ICMP).code)==3:
+                        pass
+                    elif(int(item.getlayer(ICMP).type)==3 and int(item.getlayer(ICMP).code) in [1,2,9,10,13]):
+                        new_port = Puerto(dst_port, 'udp')
+                        new_port.estado = 'filtered'
+                        target.add_port(new_port)
+    elif response.getlayer(UDP):
+        new_port = Puerto(dst_port, 'udp')
+        new_port.estado = 'open'
+        target.add_port(new_port)
+        target.setUp()
+    elif response.getlayer(ICMP):
+        if (int(response.getlayer(ICMP).type) == 3) and int(response.getlayer(ICMP).code) == 3:
+            pass
+        elif (int(response.getlayer(ICMP).type) == 3 and int(response.getlayer(ICMP).code) in [1, 2, 9, 10, 13]):
+            new_port = Puerto(dst_port, 'udp')
+            new_port.estado = 'filtered'
+            target.add_port(new_port)
+
 
 def synscan():
     print("Has seleccionado la función 2")
@@ -345,9 +336,18 @@ def synscan():
 def tcpconnect():
     print("Has seleccionado la función 3")
 
-def ackscan():
-    print("Has seleccionado la función 3")
-
+def ackscan(target, dst_port, tout):
+    src_port = RandShort()
+    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="A"), timeout=tout, verbose=0)
+    if response is not None:
+        if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x4:
+            print(f"no firewall")
+        elif response.haslayer(ICMP):
+            if (int(response.getlayer(ICMP).type) == 3 and int(response.getlayer(ICMP).code) in [1, 2, 3, 9, 10, 13]):
+                print(f"statful firewall")
+    else:
+        print(f"statful firewall")
+    return target
 
 # Creamos un diccionario que mapea nombres de funciones a objetos de función
 funciones = {
@@ -396,6 +396,57 @@ def seleccionar_funcion(nombre_funcion, parametros, hilos):
         print(f"La función {nombre_funcion} no existe")
 
 
+def seleccionar_funcion2(nombre_funcion, parametros, hilos):
+    targets = parametros[0]
+    ports = parametros[1]
+    ifaz = parametros[2]
+    tout = parametros[3]
+
+    # Buscamos la función correspondiente en el diccionario
+    funcion = funciones.get(nombre_funcion)
+    if funcion is not None:
+        if funcion.__name__ in ["arpping", "icmpping"]:
+            with tqdm(total=len(targets)) as pbar:
+                threads = []
+                for i, target in enumerate(targets):
+                    if i >= hilos:
+                        pass #break
+                    thread = threading.Thread(target=funcion, args=(ifaz, target, tout))
+                    thread.start()
+                    threads.append(thread)
+                    if (i + 1) % hilos == 0:
+                        for thread in threads:
+                            pbar.update(1)
+                            thread.join()
+                        threads = []
+                # Espera a que todos los hilos terminen
+                for thread in threads:
+                    pbar.update(1)
+                    thread.join()
+        else:
+            targets_ports = [(target, port) for target in targets for port in raw_ports]
+            total_works = len(targets_ports)
+            with tqdm(total=len(targets)*len(ports)) as pbar:
+                threads = []
+                for i, target_port in enumerate(targets_ports):
+                    if i >= hilos:
+                        pass #break
+                    thread = threading.Thread(target=funcion, args=(target_port[0], target_port[1], tout))
+                    thread.start()
+                    threads.append(thread)
+                    if (i + 1) % hilos == 0:
+                        for thread in threads:
+                            pbar.update(1)
+                            thread.join()
+                        threads = []
+                # Espera a que todos los hilos terminen
+                for thread in threads:
+                    pbar.update(1)
+                    thread.join()
+    else:
+        print(f"La función {nombre_funcion} no existe")
+
+
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     # Capturamos el Ctrl-C para hacer una salida ordenada
@@ -411,7 +462,7 @@ if __name__ == '__main__':
                         default=get_work_interface())
     parser.add_argument("--timeout", help="Tiempo de espera para la recepcion de las respuestas: ", type=int,
                         default=5)
-    parser.add_argument("-H", "--hilos", help="numero de hilos", type=int, default=128)
+    parser.add_argument("-H", "--hilos", help="numero de hilos", type=int, default=1280)
     parser.add_argument('--scantype',
                         default='arpping',
                         const='arpping',
@@ -428,49 +479,19 @@ if __name__ == '__main__':
     hilos = args.hilos
     scantype = args.scantype
 
-
-
-
     parametros=[targets, raw_ports, ifaz, tout]
-    conf.verb = -1  # para evitar mensajes de warning de scapy
-    seleccionar_funcion(scantype, parametros, hilos)
-    seleccionar_funcion('icmpping', parametros, hilos)
-    seleccionar_funcion('tcpping', parametros, hilos)
-    conf.verb = 1  # para evitar mensajes de warning de scapy
-    '''
-    with tqdm(total=len(targets)) as pbar1:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=128) as executor:
-            #executor.map(arp_scan2, arguments)
-            futures = [executor.submit(arp_scan, ifaz, target, tout) for target in targets]
-            for future in concurrent.futures.as_completed(futures):
-                # get the downloaded url data
-                pbar1.update(1)
-                #future.add_done_callback(progress_indicator)
-                target = future.result()
-                #if target.getUP():
-                    #print("[!]IP:{0} esta arriba".format(str(target.ip)))
-    #targets = arp_scan(ifaz, targets, tout)
-    #[print("IP:{0} esta arriba".format(str(target.ip))) for target in targets if target.getUP()]
 
-    targets_ports = [(target, port) for target in targets for port in target_ports if target.getUP()]
-    targets_ports = [(target, port) for target in targets for port in raw_ports if target.getUP()]
-    with tqdm(total=len(targets_ports)) as pbar2:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=128) as executor:
-            #futures = [executor.submit(tcp_connect_scan, aux[0], aux[1], tout) for aux in targets_ports]
-            #futures = [executor.submit(tcp_connect_scan, target, port, tout) for target in targets for port in target_ports if target.getUP()]
-            futures = [executor.submit(tcp_connect_scan, target, port, tout) for target in targets for port in
-                       raw_ports if target.getUP()]
-            for future in concurrent.futures.as_completed(futures):
-                pbar2.update(1)
-                target = future.result()
-                '''
+    seleccionar_funcion2(scantype, parametros, hilos)
+    seleccionar_funcion2('icmpping', parametros, hilos)
+    seleccionar_funcion2('tcpping', parametros, hilos)
+
     for target in targets:
         if target.getUP():
+            target.setDown()
             print("equipo {0}, MAC:{1}, ttl:{2} is UP".format(str(target.ip),str(target.mac),str(target.ttl)))
             for port in target.puertos:
                 print("\tIP:{0} - Port:{1} => {2}".format(str(target.ip), str(port.numero), str(port.estado)))
     #equipos = tcp_connect_scan()
 
-    print_hi('PyCharm')
 
 # See PyCharm help at https://www.jetbrains.com/help/pycharm/
