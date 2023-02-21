@@ -22,7 +22,7 @@ class Equipo:
         self._up = False
         self.nombre = ""
         self.mac = ""
-        self.ttl = 0
+        self.ttl = 0 # Idea: alamcenar en un set() todos los ttl de los paquetes recibidos. Si el ttl es distinto puede significar que el puerto este filtrado
         self.puertos = []
         self.so = ""
         self.firewalled = False
@@ -56,7 +56,7 @@ class Puerto:
     def __init__(self,numero,tipo):
         self._numero = numero
         self._tipo = tipo #tcp,udp,sctp
-        self._estado = "" #open,closed,filtered
+        self._estado = "" #open,closed,filtered,open/filtered
     def __hash__(self):
         return hash(self._numero)
     def __eq__(self, other):
@@ -93,7 +93,7 @@ class Puerto:
     def estado(self, value):
         if not isinstance(value, str):
             raise TypeError("El tido debe ser un string")
-        if value not in ["open", "closed", "filtered"]:
+        if value not in ["open", "closed", "filtered", "open/filtered"]:
             raise TypeError("el valor debe ser open, closed o filtered")
         self._estado = value
     '''def setEstado(self, value):
@@ -223,79 +223,44 @@ def arpping(ifaz, target, tout):
         target.mac = ans.hwsrc
     return target
 
-
 def icmpping(ifaz, target, tout):
-    ans = srp1(Ether()/IP(dst=str(target.ip))/ICMP(), iface=ifaz, timeout=tout, verbose=0)
-    if ans is not None:
+    response = srp1(Ether()/IP(dst=str(target.ip))/ICMP(), iface=ifaz, timeout=tout, verbose=0)
+    if response is not None:
         #print(f"[+] el equipo {str(target.ip)} esta arriba")
         target.setUp()
-        target.ttl = ans.ttl
-        target.mac = ans.src
+        target.ttl = response.ttl
+        target.mac = response.src
     return target
-
-
-def tcp_connect_scan2(target, dst_port, tout):
-    src_port = RandShort()
-    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="S"), timeout=tout, verbose=0)
-    if(str(type(response))=="<class 'NoneType'>"):
-        #dst_port.estado = "closed"
-        pass
-    elif(response.haslayer(TCP)):
-        if(response.getlayer(TCP).flags == 0x12):
-            # este lo manda el SSOO
-            #send_rst = sr1(IP(dst=str(target.ip))/TCP(sport=src_port,dport=int(dst_port.numero),flags="AR"), timeout=tout, verbose=0)
-            send_rst = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="R"),
-                           timeout=tout, verbose=0)
-            #dst_port.estado = "open"
-            #target.add_port(copy(dst_port))
-            print("paquete {0} open.".format(response.summary()))
-            target.add_port(Puerto(dst_port, 'tcp'))
-        elif(response.getlayer(TCP).flags == 0x14):
-            #dst_port.estado = "closed"
-            pass
-    return target
-
 
 def tcpping(target, dst_port, tout):
-    src_port = RandShort()
-    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="S"), timeout=tout, verbose=0)
+    '''
+    TCP Syn Scan (-sS).
+    1. Syn->
+    2. <-Syn+Ack
+    3. Rst->
+    Verificado con wireshark y nmap
+    :param target:
+    :param dst_port:
+    :param tout:
+    :return:
+    '''
+    src_port = RandShort()._fix()
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="S"), timeout=tout, verbose=0)
     if response is not None:
         if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x12:
             target.setUp()
             new_port=Puerto(dst_port, 'tcp')
             new_port.estado='open'
             target.add_port(new_port)
+            target.ttl = response.ttl
+            target.mac = response.src
             response_packet = sr1(IP(dst=str(target.ip))/TCP(sport=src_port, dport=port, flags="R"), timeout=tout, verbose=0)
         else:
-            pass
+            pass # si esta cerrado se recibe un Rst=1, Ack=1 (0x14), win=0, len=0
     return target
-
-
-def tcpstealthscan(target, dst_port, tout):
-    src_port = RandShort()
-    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="S"), timeout=tout, verbose=0)
-    if response is not None:
-        if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x12:
-            target.setUp()
-            #print(f"[+] Port {port} is open on {ip}")
-            new_port=Puerto(dst_port, 'tcp')
-            new_port.estado='open'
-            target.add_port(new_port)
-            response_packet = sr1(IP(dst=str(target.ip))/TCP(sport=src_port, dport=port, flags="R"), timeout=tout, verbose=0)
-        elif response.haslayer(ICMP):
-            if(int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]):
-                new_port = Puerto(dst_port, 'tcp')
-                new_port.estado = 'filtered'
-                target.add_port(new_port)
-    else:
-        new_port=Puerto(dst_port, 'tcp')
-        new_port.estado='filtered'
-        target.add_port(new_port)
-    return target
-
 
 def udpping(target, dst_port, tout):
-    src_port = RandShort()
+    src_port = RandShort()._fix()
     response = sr1(IP(dst=str(target.ip)) / UDP(sport=src_port, dport=dst_port), timeout=tout, verbose=0)
 
     # Analiza la respuesta
@@ -329,25 +294,179 @@ def udpping(target, dst_port, tout):
             new_port.estado = 'filtered'
             target.add_port(new_port)
 
+def tcpconnectscan(target, dst_port, tout):
+    '''
+    TCP Syn Scan (-sS).
+    1. Syn->
+    2. <-Syn+Ack
+    3. Ack->
+    4. Rst->
+    Tenemos el problema de que el SSOO manda el Rst antes de que nosotros mandemos el Ack y luego el Rst.
+    Para determinar el estado del puerto es transparente
+    :param target:
+    :param dst_port:
+    :param tout:
+    :return:
+    '''
+    src_port = RandShort()._fix()
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="S"), timeout=tout, verbose=0)
+    if(str(type(response))=="<class 'NoneType'>"):
+        pass
+    elif(response.haslayer(TCP)):
+        if(response.getlayer(TCP).flags == 0x12):
+            # este lo manda el SSOO
+            send_rst = srp1(Ether()/IP(dst=str(target.ip))/TCP(sport=src_port, dport=int(dst_port), flags="A"), timeout=tout, verbose=0)
+            send_rst = srp1(Ether()/IP(dst=str(target.ip))/TCP(sport=src_port, dport=int(dst_port), flags="R"), timeout=tout, verbose=0)
+            target.setUp()
+            new_port=Puerto(dst_port, 'tcp')
+            new_port.estado='open'
+            target.add_port(new_port)
+            target.ttl = response.ttl
+            target.mac = response.src
+        elif(response.getlayer(TCP).flags == 0x14):
+            pass
+    return target
 
-def synscan():
-    print("Has seleccionado la función 2")
-
-def tcpconnect():
-    print("Has seleccionado la función 3")
+def tcpstealthscan(target, dst_port, tout):
+    '''
+    Poca diferencia con el connect scan en cuanto intercambio de paquetes.
+    En esta ocasion, si no se recibe respuesta o esta es un paquete icmp se clasifica el puerto como filtered
+    :param target:
+    :param dst_port:
+    :param tout:
+    :return:
+    '''
+    src_port = RandShort()._fix()
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="S"), timeout=tout, verbose=0)
+    if response is not None:
+        if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x12:
+            target.setUp()
+            #print(f"[+] stealthscan:Port {dst_port} is open on {str(target.ip)}")
+            new_port=Puerto(dst_port, 'tcp')
+            new_port.estado='open'
+            target.add_port(new_port)
+            target.ttl = response.ttl
+            target.mac = response.src
+            response_packet = srp1(Ether()/IP(dst=str(target.ip))/TCP(sport=src_port, dport=port, flags="R"), timeout=tout, verbose=0)
+        elif response.haslayer(TCP) and (response.getlayer(TCP).flags == 0x14):
+            #print(f"[+] stealthscan:Port {dst_port} is closed on {str(target.ip)}")
+            pass
+        elif response.haslayer(ICMP):
+            if(int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]):
+                #print(f"[+] stealthscan:Port {dst_port} is filtered by icmp on {str(target.ip)}")
+                new_port = Puerto(dst_port, 'tcp')
+                new_port.estado = 'filtered'
+                target.add_port(new_port)
+                target.ttl = response.ttl
+                target.mac = response.src
+    else:
+        #print(f"[+] stealthscan:Port {dst_port} is filtered on {str(target.ip)}")
+        new_port=Puerto(dst_port, 'tcp')
+        new_port.estado='filtered'
+        target.add_port(new_port)
+    return target
 
 def ackscan(target, dst_port, tout):
-    src_port = RandShort()
-    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="A"), timeout=tout, verbose=0)
+    '''
+    nmap -sA
+    Se busca determinar si el objetivo está detras de un firewall
+    :param target:
+    :param dst_port:
+    :param tout:
+    :return:
+    '''
+    src_port = RandShort()._fix()
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="A"), timeout=tout, verbose=0)
     if response is not None:
         if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x4:
-            print(f"no firewall")
+            target.setUp()
+            target.firewalled = False
+            target.ttl = response.ttl
+            target.mac = response.src
+            print(f"port {dst_port} no firewall (Reset)")
         elif response.haslayer(ICMP):
             if (int(response.getlayer(ICMP).type) == 3 and int(response.getlayer(ICMP).code) in [1, 2, 3, 9, 10, 13]):
-                print(f"statful firewall")
+                target.firewalled = True
+                target.ttl = response.ttl
+                target.mac = response.src
+                print(f"port {dst_port} stateful firewall (ICMP)")
     else:
-        print(f"statful firewall")
+        target.firewalled = True
+        print(f"port {dst_port} stateful firewall (DROP)")
     return target
+
+def xmasscan(target, dst_port, tout):
+    '''
+    nmap -sX
+    :param target:
+    :param dst_port:
+    :param tout:
+    :return:
+    '''
+    src_port = RandShort()._fix()
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="FPU"), timeout=tout, verbose=0)
+    if response is None:
+        print(f"port {dst_port} Open/filtered")
+    elif response.haslayer(TCP) and response.getlayer(TCP).flags == 0x14:
+        # Se supone que si el puerto está cerrado debería responder con un AR, pero por lo menos la raspberry no manda nada
+        print(f"port {dst_port} Closed")
+    elif response.haslayer(ICMP) and int(response.getlayer(ICMP).type)==3:
+        print(F"port {port} filtered")
+        new_port = Puerto(dst_port, 'tcp')
+        new_port.estado = 'filtered'
+        target.add_port(new_port)
+        target.ttl = response.ttl
+        target.mac = response.src
+    else:
+        pass
+
+def finscan(target, dst_port, tout):
+    src_port = RandShort()._fix()
+    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="F"), timeout=tout, verbose=0)
+    if response is None:
+        print(f"port {dst_port} Open/filtered")
+        target.setUp()
+        new_port = Puerto(dst_port, 'tcp')
+        new_port.estado = 'open/filtered'
+        target.add_port(new_port)
+    elif response.haslayer(TCP) and response.getlayer(TCP).flags == 0x14:
+            print(f"port {dst_port} Closed")
+    elif response.haslayer(ICMP):
+        if int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]:
+            print(f"port {dst_port} filtered")
+            target.setUp()
+            new_port=Puerto(dst_port, 'tcp')
+            new_port.estado='filtered'
+            target.add_port(new_port)
+
+def nullscan(target, dst_port, tout):
+    src_port = RandShort()._fix()
+    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags=0x00), timeout=tout, verbose=0)
+    if response is None:
+        print(f"port {dst_port} Open")
+        target.setUp()
+        new_port = Puerto(dst_port, 'tcp')
+        new_port.estado = 'open'
+        target.add_port(new_port)
+    elif response.haslayer(TCP) and response.getlayer(TCP).flags == "R":
+            print(f"port {dst_port} Closed")
+
+def winscan(target, dst_port, tout):
+    src_port = RandShort()._fix()
+    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="A"), timeout=tout, verbose=0)
+    if response is None:
+        target.firewalled = True
+        print(f"port {dst_port} stateful firewall")
+    elif response.haslayer(TCP):
+        if response.getlayer(TCP).window == 0:
+            print(f"port closed")
+        elif response.getlayer(TCP).window > 0:
+            print(f"port {dst_port} Open")
+            target.setUp()
+            new_port = Puerto(dst_port, 'tcp')
+            new_port.estado = 'open'
+            target.add_port(new_port)
+
 
 # Creamos un diccionario que mapea nombres de funciones a objetos de función
 funciones = {
@@ -355,9 +474,13 @@ funciones = {
     "icmpping": icmpping,
     "tcpping": tcpping,
     "udpping": udpping,
-    "synscan": synscan,
-    "tcpconnect": tcpconnect,
-    "ackscan": ackscan
+    "tcpconnectscan": tcpconnectscan,
+    "tcpstealthscan": tcpstealthscan,
+    "ackscan": ackscan,
+    "xmasscan": xmasscan,
+    "finscan": finscan,
+    "nullscan": nullscan,
+    "winscan": winscan
 }
 
 # Definimos una función que selecciona y ejecuta una función en función del parámetro de entrada
@@ -467,7 +590,7 @@ if __name__ == '__main__':
                         default='arpping',
                         const='arpping',
                         nargs='?',
-                        choices=['arpping', 'icmpping', 'tcpping', 'udpping', 'synscan', 'tcpconnect', 'ackscan', 'all'],
+                        choices=['arpping', 'icmpping', 'tcpping', 'udpping', 'tcpconnectscan', 'tcpstealthscan', 'ackscan', 'xmasscan', 'finscan', 'nullscan', 'winscan', 'all'],
                         help='Tipo de escaneo (default: %(default)s)')
     parser.add_argument("--test", help="tipo de escaneo a ejecutar", default="arpscan", )
     # Se procesas los argumentos
@@ -482,11 +605,19 @@ if __name__ == '__main__':
     parametros=[targets, raw_ports, ifaz, tout]
 
     seleccionar_funcion2(scantype, parametros, hilos)
-    seleccionar_funcion2('icmpping', parametros, hilos)
-    seleccionar_funcion2('tcpping', parametros, hilos)
+    #seleccionar_funcion2('icmpping', parametros, hilos)
+    #seleccionar_funcion2('tcpping', parametros, hilos)
+    #seleccionar_funcion2('udpping', parametros, hilos)
+    #seleccionar_funcion2('tcpconnectscan', parametros, hilos)
+    #seleccionar_funcion2('tcpstealthscan', parametros, hilos)
+    #seleccionar_funcion2('ackscan', parametros, hilos)
+    #seleccionar_funcion2('xmasscan', parametros, hilos)
+    #seleccionar_funcion2('finscan', parametros, hilos)
+    #seleccionar_funcion2('nullscan', parametros, hilos)
+    #seleccionar_funcion2('winscan', parametros, hilos)
 
     for target in targets:
-        if target.getUP():
+        if target.getUP() or 1==1:
             target.setDown()
             print("equipo {0}, MAC:{1}, ttl:{2} is UP".format(str(target.ip),str(target.mac),str(target.ttl)))
             for port in target.puertos:
