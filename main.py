@@ -11,10 +11,9 @@ from scapy.all import *
 from sys import platform
 from tqdm import tqdm
 from copy import copy
+import socket
 
 
-# Press Mayús+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
 #clase equipo para almacenar los equipos que se encuentren
 class Equipo:
     def __init__(self, ip):
@@ -57,6 +56,7 @@ class Puerto:
         self._numero = numero
         self._tipo = tipo #tcp,udp,sctp
         self._estado = "" #open,closed,filtered,open/filtered
+        self._banner = ""
     def __hash__(self):
         return hash(self._numero)
     def __eq__(self, other):
@@ -261,38 +261,30 @@ def tcpping(target, dst_port, tout):
 
 def udpping(target, dst_port, tout):
     src_port = RandShort()._fix()
-    response = sr1(IP(dst=str(target.ip)) / UDP(sport=src_port, dport=dst_port), timeout=tout, verbose=0)
+    response = srp1(Ether()/IP(dst=str(target.ip)) / UDP(sport=src_port, dport=dst_port), timeout=tout, verbose=0)
 
     # Analiza la respuesta
     if response is None:
-        retrans=[]
-        for count in range(0,3):
-            retrans.append(sr1(IP(dst=str(target.ip))/UDP(sport=src_port, dport=dst_port), timeout=tout, verbose=0))
-            for item in retrans:
-                if (item.haslayer(UDP)):
-                    new_port = Puerto(dst_port, 'udp')
-                    new_port.estado = 'open'
-                    target.add_port(new_port)
-                    target.setUp()
-                elif (item.haslayer(ICMP)):
-                    if(int(item.getlayer(ICMP).type)==3) and int(item.getlayer(ICMP).code)==3:
-                        pass
-                    elif(int(item.getlayer(ICMP).type)==3 and int(item.getlayer(ICMP).code) in [1,2,9,10,13]):
-                        new_port = Puerto(dst_port, 'udp')
-                        new_port.estado = 'filtered'
-                        target.add_port(new_port)
-    elif response.getlayer(UDP):
+        #print(F"port {port} open/filtered")
+        new_port = Puerto(dst_port, 'udp')
+        new_port.estado = 'open/filtered'
+        target.add_port(new_port)
+    elif response.haslayer(UDP):
         new_port = Puerto(dst_port, 'udp')
         new_port.estado = 'open'
         target.add_port(new_port)
         target.setUp()
-    elif response.getlayer(ICMP):
+        target.ttl = response.ttl
+        target.mac = response.src
+    elif response.haslayer(ICMP):
         if (int(response.getlayer(ICMP).type) == 3) and int(response.getlayer(ICMP).code) == 3:
             pass
         elif (int(response.getlayer(ICMP).type) == 3 and int(response.getlayer(ICMP).code) in [1, 2, 9, 10, 13]):
             new_port = Puerto(dst_port, 'udp')
             new_port.estado = 'filtered'
             target.add_port(new_port)
+            target.ttl = response.ttl
+            target.mac = response.src
 
 def tcpconnectscan(target, dst_port, tout):
     '''
@@ -406,12 +398,14 @@ def xmasscan(target, dst_port, tout):
     src_port = RandShort()._fix()
     response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="FPU"), timeout=tout, verbose=0)
     if response is None:
-        print(f"port {dst_port} Open/filtered")
+        #print(f"port {dst_port} Open/filtered")
+        pass
     elif response.haslayer(TCP) and response.getlayer(TCP).flags == 0x14:
         # Se supone que si el puerto está cerrado debería responder con un AR, pero por lo menos la raspberry no manda nada
-        print(f"port {dst_port} Closed")
+        #print(f"port {dst_port} Closed")
+        pass
     elif response.haslayer(ICMP) and int(response.getlayer(ICMP).type)==3:
-        print(F"port {port} filtered")
+        #print(F"port {port} filtered")
         new_port = Puerto(dst_port, 'tcp')
         new_port.estado = 'filtered'
         target.add_port(new_port)
@@ -421,39 +415,73 @@ def xmasscan(target, dst_port, tout):
         pass
 
 def finscan(target, dst_port, tout):
+    '''
+    nmap -sF
+    :param target:
+    :param dst_port:
+    :param tout:
+    :return:
+    '''
     src_port = RandShort()._fix()
-    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="F"), timeout=tout, verbose=0)
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="F"), timeout=tout, verbose=0)
     if response is None:
-        print(f"port {dst_port} Open/filtered")
-        target.setUp()
+        #print(f"port {dst_port} Open/filtered")
+        #target.setUp()
         new_port = Puerto(dst_port, 'tcp')
         new_port.estado = 'open/filtered'
         target.add_port(new_port)
     elif response.haslayer(TCP) and response.getlayer(TCP).flags == 0x14:
-            print(f"port {dst_port} Closed")
+            #print(f"port {dst_port} Closed")
+            pass
     elif response.haslayer(ICMP):
         if int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]:
-            print(f"port {dst_port} filtered")
+            #print(f"port {dst_port} filtered")
             target.setUp()
             new_port=Puerto(dst_port, 'tcp')
             new_port.estado='filtered'
             target.add_port(new_port)
+            target.ttl = response.ttl
+            target.mac = response.src
 
 def nullscan(target, dst_port, tout):
+    '''
+    nmap -sN
+    :param target:
+    :param dst_port:
+    :param tout:
+    :return:
+    '''
     src_port = RandShort()._fix()
-    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags=0x00), timeout=tout, verbose=0)
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags=0x00), timeout=tout, verbose=0)
     if response is None:
-        print(f"port {dst_port} Open")
-        target.setUp()
+        #print(f"port {dst_port} Open/Filtered")
+        #target.setUp()
         new_port = Puerto(dst_port, 'tcp')
-        new_port.estado = 'open'
+        new_port.estado = 'open/filtered'
         target.add_port(new_port)
     elif response.haslayer(TCP) and response.getlayer(TCP).flags == "R":
-            print(f"port {dst_port} Closed")
+            #print(f"port {dst_port} Closed")
+            pass
+    elif response.haslayer(ICMP):
+        if int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]:
+            #print(f"port {dst_port} filtered")
+            target.setUp()
+            new_port=Puerto(dst_port, 'tcp')
+            new_port.estado='filtered'
+            target.add_port(new_port)
+            target.ttl = response.ttl
+            target.mac = response.src
 
 def winscan(target, dst_port, tout):
+    '''
+    nmap -sW
+    :param target:
+    :param dst_port:
+    :param tout:
+    :return:
+    '''
     src_port = RandShort()._fix()
-    response = sr1(IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="A"), timeout=tout, verbose=0)
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="A"), timeout=tout, verbose=0)
     if response is None:
         target.firewalled = True
         print(f"port {dst_port} stateful firewall")
@@ -466,7 +494,28 @@ def winscan(target, dst_port, tout):
             new_port = Puerto(dst_port, 'tcp')
             new_port.estado = 'open'
             target.add_port(new_port)
+            target.ttl = response.ttl
+            target.mac = response.src
+    elif response.haslayer(ICMP):
+        if int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]:
+            #print(f"port {dst_port} filtered")
+            target.setUp()
+            new_port=Puerto(dst_port, 'tcp')
+            new_port.estado='filtered'
+            target.add_port(new_port)
+            target.ttl = response.ttl
+            target.mac = response.src
 
+def bannergrabbing(target, dst_port, tout):
+    #primero buscamos si el puerto para el target esta abierto
+
+    socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        socket.connect((str(target.ip), int(dst_port)))
+        socket.settimeout(tout)
+        banner = socket.recv(1024)
+    except:
+        pass
 
 # Creamos un diccionario que mapea nombres de funciones a objetos de función
 funciones = {
@@ -480,7 +529,8 @@ funciones = {
     "xmasscan": xmasscan,
     "finscan": finscan,
     "nullscan": nullscan,
-    "winscan": winscan
+    "winscan": winscan,
+    "bannergrabbing": bannergrabbing
 }
 
 # Definimos una función que selecciona y ejecuta una función en función del parámetro de entrada
@@ -517,7 +567,6 @@ def seleccionar_funcion(nombre_funcion, parametros, hilos):
             #funcion()
     else:
         print(f"La función {nombre_funcion} no existe")
-
 
 def seleccionar_funcion2(nombre_funcion, parametros, hilos):
     targets = parametros[0]
@@ -570,7 +619,6 @@ def seleccionar_funcion2(nombre_funcion, parametros, hilos):
         print(f"La función {nombre_funcion} no existe")
 
 
-# Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     # Capturamos el Ctrl-C para hacer una salida ordenada
     signal(SIGINT, handler)
@@ -605,24 +653,13 @@ if __name__ == '__main__':
     parametros=[targets, raw_ports, ifaz, tout]
 
     seleccionar_funcion2(scantype, parametros, hilos)
-    #seleccionar_funcion2('icmpping', parametros, hilos)
-    #seleccionar_funcion2('tcpping', parametros, hilos)
-    #seleccionar_funcion2('udpping', parametros, hilos)
-    #seleccionar_funcion2('tcpconnectscan', parametros, hilos)
-    #seleccionar_funcion2('tcpstealthscan', parametros, hilos)
-    #seleccionar_funcion2('ackscan', parametros, hilos)
-    #seleccionar_funcion2('xmasscan', parametros, hilos)
-    #seleccionar_funcion2('finscan', parametros, hilos)
-    #seleccionar_funcion2('nullscan', parametros, hilos)
-    #seleccionar_funcion2('winscan', parametros, hilos)
+
 
     for target in targets:
-        if target.getUP() or 1==1:
+        if target.getUP():
             target.setDown()
             print("equipo {0}, MAC:{1}, ttl:{2} is UP".format(str(target.ip),str(target.mac),str(target.ttl)))
             for port in target.puertos:
                 print("\tIP:{0} - Port:{1} => {2}".format(str(target.ip), str(port.numero), str(port.estado)))
-    #equipos = tcp_connect_scan()
 
 
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
