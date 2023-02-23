@@ -2,6 +2,7 @@
 import argparse
 import ipaddress
 import logging
+import socket
 logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 import threading
 import time
@@ -11,7 +12,7 @@ from scapy.all import *
 from sys import platform
 from tqdm import tqdm
 from copy import copy
-import socket
+
 
 
 #clase equipo para almacenar los equipos que se encuentren
@@ -21,7 +22,7 @@ class Equipo:
         self._up = False
         self.nombre = ""
         self.mac = ""
-        self.ttl = 0 # Idea: alamcenar en un set() todos los ttl de los paquetes recibidos. Si el ttl es distinto puede significar que el puerto este filtrado
+        self.ttl = 0 # Idea: alamcenar en un set() todos los ttl de los paquetes recibidos. Si el ttl es distinto puede significar que el equipo este detras de un firewall
         self.puertos = []
         self.so = ""
         self.firewalled = False
@@ -63,6 +64,16 @@ class Puerto:
         if isinstance(other, Puerto):
             return self._numero == other._numero
         return NotImplemented
+    def bannergrabbing(self, target, tout):
+        banner = ""
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.connect((str(target), int(self.numero)))
+            s.settimeout(tout)
+            banner = s.recv(1024).decode("utf-8")
+        except:
+            pass
+        self._banner = banner
 
     @property
     def numero(self):
@@ -102,12 +113,14 @@ class Puerto:
         if value not in ["open", "closed", "filtered"]:
             raise TypeError("El estado debe ser open, close, filtered")
         self.estado = value'''
-
-'''
-# simple progress indicator callback function
-def progress_indicator(future):
-    print('.', end='', flush=True)
-'''
+    @property
+    def banner(self):
+        return self._banner
+    @banner.setter
+    def banner(self, value):
+        if not isinstance(value, str):
+            raise TypeError("El tipo debe ser un string")
+        self._banner = value
 
 def get_interfaces():
     interfaces = []
@@ -251,6 +264,7 @@ def tcpping(target, dst_port, tout):
             target.setUp()
             new_port=Puerto(dst_port, 'tcp')
             new_port.estado='open'
+            new_port.bannergrabbing(str(target.ip),tout)
             target.add_port(new_port)
             target.ttl = response.ttl
             target.mac = response.src
@@ -312,6 +326,7 @@ def tcpconnectscan(target, dst_port, tout):
             target.setUp()
             new_port=Puerto(dst_port, 'tcp')
             new_port.estado='open'
+            new_port.bannergrabbing(str(target.ip), tout)
             target.add_port(new_port)
             target.ttl = response.ttl
             target.mac = response.src
@@ -336,6 +351,7 @@ def tcpstealthscan(target, dst_port, tout):
             #print(f"[+] stealthscan:Port {dst_port} is open on {str(target.ip)}")
             new_port=Puerto(dst_port, 'tcp')
             new_port.estado='open'
+            new_port.bannergrabbing(str(target.ip), tout)
             target.add_port(new_port)
             target.ttl = response.ttl
             target.mac = response.src
@@ -493,6 +509,7 @@ def winscan(target, dst_port, tout):
             target.setUp()
             new_port = Puerto(dst_port, 'tcp')
             new_port.estado = 'open'
+            new_port.bannergrabbing(str(target.ip), tout)
             target.add_port(new_port)
             target.ttl = response.ttl
             target.mac = response.src
@@ -507,15 +524,21 @@ def winscan(target, dst_port, tout):
             target.mac = response.src
 
 def bannergrabbing(target, dst_port, tout):
-    #primero buscamos si el puerto para el target esta abierto
-
-    socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    banner = ""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        socket.connect((str(target.ip), int(dst_port)))
-        socket.settimeout(tout)
-        banner = socket.recv(1024)
+        s.connect((str(target.ip), int(dst_port)))
+        s.settimeout(tout)
+        banner = s.recv(1024).decode('utf-8')
+        if banner:
+            target.setUp()
+            new_port=Puerto(dst_port, 'tcp')
+            new_port.estado='open'
+            new_port.banner=banner
+            target.add_port(new_port)
     except:
         pass
+
 
 # Creamos un diccionario que mapea nombres de funciones a objetos de función
 funciones = {
@@ -638,7 +661,7 @@ if __name__ == '__main__':
                         default='arpping',
                         const='arpping',
                         nargs='?',
-                        choices=['arpping', 'icmpping', 'tcpping', 'udpping', 'tcpconnectscan', 'tcpstealthscan', 'ackscan', 'xmasscan', 'finscan', 'nullscan', 'winscan', 'all'],
+                        choices=['arpping', 'icmpping', 'tcpping', 'udpping', 'tcpconnectscan', 'tcpstealthscan', 'ackscan', 'xmasscan', 'finscan', 'nullscan', 'winscan', 'bannergrabbing', 'all'],
                         help='Tipo de escaneo (default: %(default)s)')
     parser.add_argument("--test", help="tipo de escaneo a ejecutar", default="arpscan", )
     # Se procesas los argumentos
@@ -660,6 +683,6 @@ if __name__ == '__main__':
             target.setDown()
             print("equipo {0}, MAC:{1}, ttl:{2} is UP".format(str(target.ip),str(target.mac),str(target.ttl)))
             for port in target.puertos:
-                print("\tIP:{0} - Port:{1} => {2}".format(str(target.ip), str(port.numero), str(port.estado)))
+                print("\tIP:{0} - Port:{1} => {2}:{3}".format(str(target.ip), str(port.numero), str(port.estado), port.banner))
 
 
