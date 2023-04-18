@@ -3,17 +3,15 @@ import argparse
 import ipaddress
 import logging
 import socket
-logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 import threading
-import time
-import concurrent.futures
+import ssl
+import re
 from signal import signal, SIGINT
 from scapy.all import *
 from sys import platform
 from tqdm import tqdm
-from copy import copy
-
-
+from prettytable import PrettyTable, ALL
+logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 
 #clase equipo para almacenar los equipos que se encuentren
 class Equipo:
@@ -22,10 +20,13 @@ class Equipo:
         self._up = False
         self.nombre = ""
         self.mac = ""
-        self.ttl = 0 # Idea: alamcenar en un set() todos los ttl de los paquetes recibidos. Si el ttl es distinto puede significar que el equipo este detras de un firewall
+        # Idea: almacenar en un set() todos los ttl de los paquetes recibidos. Si el ttl es distinto puede significar
+        # que el equipo este detras de un firewall
+        self.ttl = 0
         self.puertos = []
-        self.so = ""
+        #self.so = ""
         self.firewalled = False
+        self.idOS = {"ttl":"", "OS":""} #Para guardar la Indentificacion del OS cuando lo hacemos por icmp
 
     def __hash__(self):
         return hash(self.ip)
@@ -53,27 +54,118 @@ class Equipo:
 
 #clases tipo puerto para almacenar los puertos abiertos en un equipo
 class Puerto:
-    def __init__(self,numero,tipo):
+    def __init__(self, numero, tipo):
         self._numero = numero
         self._tipo = tipo #tcp,udp,sctp
         self._estado = "" #open,closed,filtered,open/filtered
         self._banner = ""
+        self.ttl = "" #para guardar el ttl del host que responde al paquete
+        self.mac = "" #para guardar la mac del host que responde al paquete
+        self.idOS = {} #Para guardar la Indentificacion del OS cuando hay un puerto abierto
     def __hash__(self):
         return hash(self._numero)
     def __eq__(self, other):
         if isinstance(other, Puerto):
             return self._numero == other._numero
         return NotImplemented
+
     def bannergrabbing(self, target, tout):
-        banner = ""
+        # protocols = ["ssh", "http", "ftp", "smb", "pop", "imap", "smtp", "ldap", "rpcbind", "raw"]
+        # for protocol in protocols:
+        resp = ""
+        # print(f"port:{dst_port} - protocol:{protocol}")
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             s.connect((str(target), int(self.numero)))
             s.settimeout(tout)
-            banner = s.recv(1024).decode("utf-8")
-        except:
+
+            if self.numero == 80:
+                s.sendall(b"GET / HTTP/1.1\r\nHost: " + str(target).encode('utf-8') + b"\r\n\r\n")
+                resp = s.recv(1024).decode('utf-8')
+                s.close()
+            elif self.numero == 443:
+                s.close()
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                ssl._create_default_https_context = ssl._create_unverified_context
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                s = context.wrap_socket(s, server_hostname=str(target))
+                s.connect((str(target), int(self.numero)))
+                s.sendall(b"GET / HTTP/1.1\r\nHost: " + str(target).encode('utf-8') + b"\r\n\r\n")
+                resp = s.recv(1024).decode('utf-8')
+                s.close()
+            elif self.numero == 21:
+                resp = s.recv(1024)
+                s.sendall(b'HELP\r\n')
+                resp += s.recv(1024)
+                s.send(b'USER ANONYMOUS\r\n')
+                s.recv(1024)
+                s.send(b'PASS a@b\r\n')
+                s.recv(1024)
+                s.send(b'STAT\r\n')
+                resp += s.recv(1024)
+                s.sendall(b'QUIT\r\n')
+                s.close()
+            elif self.numero == 445:
+                # NetBioS Session Service + Negotiate Protocol Request
+                nbss = (b"\x00\x00\x00\xa4\xff\x53\x4d\x42\x72\x00\x00\x00\x00\x08\x01\x40"
+                        b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x40\x06"
+                        b"\x00\x00\x01\x00\x00\x81\x00\x02\x50\x43\x20\x4e\x45\x54\x57\x4f"
+                        b"\x52\x4b\x20\x50\x52\x4f\x47\x52\x41\x4d\x20\x31\x2e\x30\x00\x02"
+                        b"\x4d\x49\x43\x52\x4f\x53\x4f\x46\x54\x20\x4e\x45\x54\x57\x4f\x52"
+                        b"\x4b\x53\x20\x31\x2e\x30\x33\x00\x02\x4d\x49\x43\x52\x4f\x53\x4f"
+                        b"\x46\x54\x20\x4e\x45\x54\x57\x4f\x52\x4b\x53\x20\x33\x2e\x30\x00"
+                        b"\x02\x4c\x41\x4e\x4d\x41\x4e\x31\x2e\x30\x00\x02\x4c\x4d\x31\x2e"
+                        b"\x32\x58\x30\x30\x32\x00\x02\x53\x61\x6d\x62\x61\x00\x02\x4e\x54"
+                        b"\x20\x4c\x41\x4e\x4d\x41\x4e\x20\x31\x2e\x30\x00\x02\x4e\x54\x20"
+                        b"\x4c\x4d\x20\x30\x2e\x31\x32\x00")
+                s.send(nbss)
+                resp = s.recv(1024).decode('utf-8', 'ignore')
+                resp = re.sub('[^ -~]+', '', resp)
+                s.close()
+            elif self.numero == 111:
+                rpcbind_packet = b"\x80\x00\x00\x28\x0b\x7a\x05\x41\x00\x00\x00\x00\x00\x00\x00\x02\x00\x01\x86\xa0\x00\x00\x00\x04\x00\x00\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+                s.sendall(rpcbind_packet)
+                resp = s.recv(1024).decode('utf-8', 'ignore')
+                resp = re.sub('[^ -~]+', '', resp)
+
+                s.close()
+            elif self.numero == 389:
+                ldap_packet = b"\x30\x84\x00\x00\x00\x2d\x02\x01\x07\x63\x84\x00\x00\x00\x24\x04\x00\x0a\x01\x00\x0a\x01\x00\x02\x01\x00\x02\x01\x64\x01\x01\x00\x87\x0b\x6f\x62\x6a\x65\x63\x74\x43\x6c\x61\x73\x73\x30\x84\x00\x00\x00\x00"
+                s.sendall(ldap_packet)
+                resp = s.recv(1024).decode('utf-8', 'ignore')
+                resp = re.sub('[^ -~]+', '', resp)
+                s.close()
+            elif self.numero == 110:
+                s.sendall(b'USER anonymous\r\n')
+                resp = s.recv(1024).decode('utf-8', 'ignore')
+                s.sendall(b'QUIT\r\n')
+                s.close()
+            elif self.numero == 143:
+                s.sendall(b'* OK IMAP4 ready\r\n')
+                resp = s.recv(1024).decode('utf-8', 'ignore')
+                s.sendall(b'* BYE IMAP4 server terminating connection\r\n')
+                resp += s.recv(1024).decode('utf-8', 'ignore')
+                s.close()
+            elif self.numero == 25:
+                resp = s.recv(1024).decode('utf-8', 'ignore')
+                s.sendall(b'EHLO test\r\n')
+                resp += s.recv(1024).decode('utf-8', 'ignore')
+                s.close()
+            elif self.numero == 22:
+                resp = s.recv(1024).decode('utf-8', 'ignore')
+                resp = re.sub('[^ -~]+', '', resp)
+                s.close()
+            else:
+                resp = s.recv(1024).decode('utf-8', 'ignore')
+                resp = re.sub('[^ -~]+', '', resp)
+                s.close()
+
+        except socket.error as err:
+            # print("port:{1}Error de socket: {0}".format(err, dst_port))
             pass
-        self._banner = banner
+        self._banner = resp
 
     @property
     def numero(self):
@@ -184,7 +276,7 @@ def set_targets(rango):
     return targets
 
 
-def set_ports(rango_puertos, tipo):
+def set_ports(rango_puertos):
     """
     función para crear una lista de obtjetos tipo 'Puertos'.
     recibe la entrada del usuario que puede ser:
@@ -198,7 +290,6 @@ def set_ports(rango_puertos, tipo):
         - -
     devuelve un listado de objetos tipo 'puertos' con las puertos objetivos
     """
-    target_ports = set()
     raw_ports = set()
     try:
         for i in rango_puertos.split(','):
@@ -206,14 +297,12 @@ def set_ports(rango_puertos, tipo):
                 puerto_inicial = 1 if i.split('-')[0] == '' else i.split('-')[0]
                 puerto_final = 65535 if i.split('-')[1] == '' else i.split('-')[1]
                 for puerto in range(int(puerto_inicial),int(puerto_final)+1):
-                    target_ports.add(Puerto(puerto, tipo))
                     raw_ports.add(puerto)
             else:
-                target_ports.add(Puerto(i, tipo))
                 raw_ports.add(int(i))
     except:
         print("Ups, algo fue mal con los puertos. Revisalos e intentalo de nuevo...")
-    return target_ports, raw_ports
+    return raw_ports
 
 
 def handler(signal, frame):
@@ -243,6 +332,7 @@ def icmpping(ifaz, target, tout):
         target.setUp()
         target.ttl = response.ttl
         target.mac = response.src
+        target.idOS = identificacionOS(response)
     return target
 
 def tcpping(target, dst_port, tout):
@@ -258,19 +348,23 @@ def tcpping(target, dst_port, tout):
     :return:
     '''
     src_port = RandShort()._fix()
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="S"), timeout=tout, verbose=0)
+    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="S", options=tcp_options), timeout=tout, verbose=0)
     if response is not None:
         if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x12:
             target.setUp()
             new_port=Puerto(dst_port, 'tcp')
             new_port.estado='open'
             new_port.bannergrabbing(str(target.ip),tout)
+            new_port.ttl = response.ttl
+            new_port.mac = response.src
+            new_port.idOS = identificacionOS(response)
             target.add_port(new_port)
             target.ttl = response.ttl
             target.mac = response.src
-            response_packet = sr1(IP(dst=str(target.ip))/TCP(sport=src_port, dport=port, flags="R"), timeout=tout, verbose=0)
         else:
-            pass # si esta cerrado se recibe un Rst=1, Ack=1 (0x14), win=0, len=0
+            # si esta cerrado se recibe un Rst=1, Ack=1 (0x14), win=0, len=0
+            pass
     return target
 
 def udpping(target, dst_port, tout):
@@ -286,19 +380,31 @@ def udpping(target, dst_port, tout):
     elif response.haslayer(UDP):
         new_port = Puerto(dst_port, 'udp')
         new_port.estado = 'open'
+        new_port.ttl = response.ttl
+        new_port.mac = response.src
+        new_port.idOS = identificacionOS(response)
         target.add_port(new_port)
         target.setUp()
         target.ttl = response.ttl
         target.mac = response.src
     elif response.haslayer(ICMP):
         if (int(response.getlayer(ICMP).type) == 3) and int(response.getlayer(ICMP).code) == 3:
+            # puerto inalcanzable
             pass
         elif (int(response.getlayer(ICMP).type) == 3 and int(response.getlayer(ICMP).code) in [1, 2, 9, 10, 13]):
             new_port = Puerto(dst_port, 'udp')
             new_port.estado = 'filtered'
+            new_port.ttl = response.ttl
+            new_port.mac = response.src
+            new_port.idOS = identificacionOS(response)
             target.add_port(new_port)
             target.ttl = response.ttl
             target.mac = response.src
+            if int(response.getlayer(ICMP).code) in [9, 10, 13]:
+                # The destination network is administratively prohibited,
+                # The destination host is administratively prohibited,
+                # Communication administratively prohibited
+                target.firewalled = True
 
 def tcpconnectscan(target, dst_port, tout):
     '''
@@ -315,7 +421,8 @@ def tcpconnectscan(target, dst_port, tout):
     :return:
     '''
     src_port = RandShort()._fix()
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="S"), timeout=tout, verbose=0)
+    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="S", options=tcp_options), timeout=tout, verbose=0)
     if(str(type(response))=="<class 'NoneType'>"):
         pass
     elif(response.haslayer(TCP)):
@@ -326,6 +433,9 @@ def tcpconnectscan(target, dst_port, tout):
             target.setUp()
             new_port=Puerto(dst_port, 'tcp')
             new_port.estado='open'
+            new_port.ttl = response.ttl
+            new_port.mac = response.src
+            new_port.idOS = identificacionOS(response)
             new_port.bannergrabbing(str(target.ip), tout)
             target.add_port(new_port)
             target.ttl = response.ttl
@@ -344,13 +454,17 @@ def tcpstealthscan(target, dst_port, tout):
     :return:
     '''
     src_port = RandShort()._fix()
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="S"), timeout=tout, verbose=0)
+    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="S", options=tcp_options), timeout=tout, verbose=0)
     if response is not None:
         if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x12:
             target.setUp()
             #print(f"[+] stealthscan:Port {dst_port} is open on {str(target.ip)}")
             new_port=Puerto(dst_port, 'tcp')
             new_port.estado='open'
+            new_port.ttl = response.ttl
+            new_port.mac = response.src
+            new_port.idOS = identificacionOS(response)
             new_port.bannergrabbing(str(target.ip), tout)
             target.add_port(new_port)
             target.ttl = response.ttl
@@ -364,9 +478,17 @@ def tcpstealthscan(target, dst_port, tout):
                 #print(f"[+] stealthscan:Port {dst_port} is filtered by icmp on {str(target.ip)}")
                 new_port = Puerto(dst_port, 'tcp')
                 new_port.estado = 'filtered'
+                new_port.ttl = response.ttl
+                new_port.mac = response.src
+                new_port.idOS = identificacionOS(response)
                 target.add_port(new_port)
                 target.ttl = response.ttl
                 target.mac = response.src
+                if int(response.getlayer(ICMP).code) in [9, 10, 13]:
+                    # The destination network is administratively prohibited,
+                    # The destination host is administratively prohibited,
+                    # Communication administratively prohibited
+                    target.firewalled = True
     else:
         #print(f"[+] stealthscan:Port {dst_port} is filtered on {str(target.ip)}")
         new_port=Puerto(dst_port, 'tcp')
@@ -384,23 +506,24 @@ def ackscan(target, dst_port, tout):
     :return:
     '''
     src_port = RandShort()._fix()
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="A"), timeout=tout, verbose=0)
+    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="A", options=tcp_options), timeout=tout, verbose=0)
     if response is not None:
         if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x4:
             target.setUp()
             target.firewalled = False
             target.ttl = response.ttl
             target.mac = response.src
-            print(f"port {dst_port} no firewall (Reset)")
+            #print(f"port {dst_port} no firewall (Reset)")
         elif response.haslayer(ICMP):
             if (int(response.getlayer(ICMP).type) == 3 and int(response.getlayer(ICMP).code) in [1, 2, 3, 9, 10, 13]):
                 target.firewalled = True
                 target.ttl = response.ttl
                 target.mac = response.src
-                print(f"port {dst_port} stateful firewall (ICMP)")
+                #print(f"port {dst_port} stateful firewall (ICMP)")
     else:
         target.firewalled = True
-        print(f"port {dst_port} stateful firewall (DROP)")
+        #print(f"port {dst_port} stateful firewall (DROP)")
     return target
 
 def xmasscan(target, dst_port, tout):
@@ -412,7 +535,8 @@ def xmasscan(target, dst_port, tout):
     :return:
     '''
     src_port = RandShort()._fix()
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="FPU"), timeout=tout, verbose=0)
+    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="FPU", options=tcp_options), timeout=tout, verbose=0)
     if response is None:
         #print(f"port {dst_port} Open/filtered")
         pass
@@ -424,6 +548,9 @@ def xmasscan(target, dst_port, tout):
         #print(F"port {port} filtered")
         new_port = Puerto(dst_port, 'tcp')
         new_port.estado = 'filtered'
+        new_port.ttl = response.ttl
+        new_port.mac = response.src
+        new_port.idOS = identificacionOS(response)
         target.add_port(new_port)
         target.ttl = response.ttl
         target.mac = response.src
@@ -439,7 +566,8 @@ def finscan(target, dst_port, tout):
     :return:
     '''
     src_port = RandShort()._fix()
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="F"), timeout=tout, verbose=0)
+    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="F",options=tcp_options), timeout=tout, verbose=0)
     if response is None:
         #print(f"port {dst_port} Open/filtered")
         #target.setUp()
@@ -455,9 +583,17 @@ def finscan(target, dst_port, tout):
             target.setUp()
             new_port=Puerto(dst_port, 'tcp')
             new_port.estado='filtered'
+            new_port.ttl = response.ttl
+            new_port.mac = response.src
+            new_port.idOS = identificacionOS(response)
             target.add_port(new_port)
             target.ttl = response.ttl
             target.mac = response.src
+            if int(response.getlayer(ICMP).code) in [9, 10, 13]:
+                # The destination network is administratively prohibited,
+                # The destination host is administratively prohibited,
+                # Communication administratively prohibited
+                target.firewalled = True
 
 def nullscan(target, dst_port, tout):
     '''
@@ -468,7 +604,8 @@ def nullscan(target, dst_port, tout):
     :return:
     '''
     src_port = RandShort()._fix()
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags=0x00), timeout=tout, verbose=0)
+    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags=0x00, options=tcp_options), timeout=tout, verbose=0)
     if response is None:
         #print(f"port {dst_port} Open/Filtered")
         #target.setUp()
@@ -484,9 +621,17 @@ def nullscan(target, dst_port, tout):
             target.setUp()
             new_port=Puerto(dst_port, 'tcp')
             new_port.estado='filtered'
+            new_port.ttl = response.ttl
+            new_port.mac = response.src
+            new_port.idOS = identificacionOS(response)
             target.add_port(new_port)
             target.ttl = response.ttl
             target.mac = response.src
+            if int(response.getlayer(ICMP).code) in [9, 10, 13]:
+                # The destination network is administratively prohibited,
+                # The destination host is administratively prohibited,
+                # Communication administratively prohibited
+                target.firewalled = True
 
 def winscan(target, dst_port, tout):
     '''
@@ -497,47 +642,160 @@ def winscan(target, dst_port, tout):
     :return:
     '''
     src_port = RandShort()._fix()
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="A"), timeout=tout, verbose=0)
+    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="A", options=tcp_options), timeout=tout, verbose=0)
     if response is None:
         target.firewalled = True
-        print(f"port {dst_port} stateful firewall")
+        #print(f"port {dst_port} stateful firewall")
     elif response.haslayer(TCP):
         if response.getlayer(TCP).window == 0:
-            print(f"port closed")
+            #print(f"port closed")
+            pass
         elif response.getlayer(TCP).window > 0:
-            print(f"port {dst_port} Open")
+            #print(f"port {dst_port} Open")
             target.setUp()
             new_port = Puerto(dst_port, 'tcp')
             new_port.estado = 'open'
+            new_port.ttl = response.ttl
+            new_port.mac = response.src
+            new_port.idOS = identificacionOS(response)
             new_port.bannergrabbing(str(target.ip), tout)
             target.add_port(new_port)
             target.ttl = response.ttl
             target.mac = response.src
     elif response.haslayer(ICMP):
-        if int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]:
+        if int(response.getlayer(ICMP).type) == 3 and int(response.getlayer(ICMP).code) in [1, 2, 3, 9, 10, 13]:
             #print(f"port {dst_port} filtered")
             target.setUp()
             new_port=Puerto(dst_port, 'tcp')
             new_port.estado='filtered'
+            new_port.ttl = response.ttl
+            new_port.mac = response.src
+            new_port.idOS = identificacionOS(response)
             target.add_port(new_port)
             target.ttl = response.ttl
             target.mac = response.src
+            if int(response.getlayer(ICMP).code) in [9, 10, 13]:
+                # The destination network is administratively prohibited,
+                # The destination host is administratively prohibited,
+                # Communication administratively prohibited
+                target.firewalled = True
 
-def bannergrabbing(target, dst_port, tout):
-    banner = ""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.connect((str(target.ip), int(dst_port)))
-        s.settimeout(tout)
-        banner = s.recv(1024).decode('utf-8')
-        if banner:
-            target.setUp()
-            new_port=Puerto(dst_port, 'tcp')
-            new_port.estado='open'
-            new_port.banner=banner
-            target.add_port(new_port)
-    except:
-        pass
+def identificacionOS(response):
+    #WWWW: MSS:TTL: WS:S: N:D: T:F: LEN:OS
+    # The fingerprint database has the following structure:                    #
+    #                                                                          #
+    # WWWW:MSS:TTL:WS:S:N:D:T:F:LEN:OS                                         #
+    #                                                                          #
+    # WWWW: 4 digit hex field indicating the TCP Window Size                   #
+    # MSS : 4 digit hex field indicating the TCP Option Maximum Segment Size   #
+    #       if omitted in the packet or unknown it is "_MSS"                   #
+    # TTL : 2 digit hex field indicating the IP Time To Live                   #
+    # WS  : 2 digit hex field indicating the TCP Option Window Scale           #
+    #       if omitted in the packet or unknown it is "WS"                     #
+    # S   : 1 digit field indicating if the TCP Option SACK permitted is true  #
+    # N   : 1 digit field indicating if the TCP Options contain a NOP          #
+    # D   : 1 digit field indicating if the IP Don't Fragment flag is set      #
+    # T   : 1 digit field indicating if the TCP Timestamp is present           #
+    # F   : 1 digit ascii field indicating the flag of the packet              #
+    #       S = SYN                                                            #
+    #       A = SYN + ACK                                                      #
+    # LEN : 2 digit hex field indicating the length of the packet              #
+    #       if irrilevant or unknown it is "LT"                                #
+    # OS  : an ascii string representing the OS                                #
+    #                                                                          #
+    fingerestructure = {"wwww": "", "mss": "", "ttl": "", "WS": "", "S": "", "N": "", "D": "",  "T": "", "F": "", "LEN": "", "OS": ""}
+    if response.haslayer(IP):
+        # obtenemos el TTL
+        ttl = response.ttl
+        dist_32 = (32 - ttl) if ttl <= 32 else 300
+        dist_64 = (64 - ttl) if ttl <= 64 else 300
+        dist_128 = (128 - ttl) if ttl <= 128 else 300
+        dist_255 = (255 - ttl)
+        dist_min = min(dist_32, dist_64, dist_128, dist_255)
+        # Dependiendo de la cercania, seleccionamos el valor en Hexadecimal
+        if dist_min == dist_32:
+            fingerestructure['ttl'] = "20"
+        elif dist_min == dist_64:
+            fingerestructure['ttl'] = "40"
+        elif dist_min == dist_128:
+            fingerestructure['ttl'] = "80"
+        else:
+            fingerestructure['ttl'] = "FF"
+        # Obtenemos IP Don't Fragment flag is set
+        fingerestructure['D'] = "0"
+        if response.flags & 0x02:
+            fingerestructure['D'] = "1"
+
+    if response.haslayer(TCP):
+        # obtenemos wwww -> el tamaño de ventana TCP:
+        fingerestructure['wwww'] = "{:0>4X}".format(response[TCP].window)
+        # obtenemos mss -> TCP Option Maximum Segment Size
+        fingerestructure['mss'] = "{:0>4X}".format(response[TCP].options[0][1]) if response[TCP].options else "_MSS"
+        # obtenemos ws -> TCP Option Window Scale
+        fingerestructure['WS'] = "WS"
+        for opt in response[TCP].options:
+            if opt[0] == 'WScale':
+                fingerestructure['WS'] = "{:0>2X}".format(opt[1])
+                break
+        # obtenemos TCP Option SACK permitted
+        fingerestructure['S'] = "0"
+        for opt in response[TCP].options:
+            if opt[0] == 'SAckOK':
+                fingerestructure['S'] = "1"
+                break
+        # obtenemos TCP Options contain a NOP
+        fingerestructure['N'] = "0"
+        if 'NOP' in [opt[0] for opt in response[TCP].options]:
+            fingerestructure['N'] = "1"
+        # obtenemos the TCP Timestamp is present
+        fingerestructure['T'] = "0"
+        if 'Timestamp' in [opt[0] for opt in response[TCP].options]:
+            fingerestructure['T'] = "1"
+        # obtenemos los flags de SYN y SYN+ACK
+        if response[TCP].flags & 0x02:
+            fingerestructure['F'] = "S"
+        if response[TCP].flags & 0x12 == 0x12:
+            fingerestructure['F'] = "A"
+    # obtenemos la longitud del paquete:
+    fingerestructure['LEN'] = "{:0>2X}".format(len(response))
+    fingerestructure['OS'] = getOS(fingerestructure)
+    #print(":".join([str(valor) for valor in fingerestructure.values()]))
+    return fingerestructure
+
+def getOS(fingerestructure):
+    # definimos un diccionario con valores conocidos de
+    # SSOO - TTL - TCP Window Size
+    # https://www.netresec.com/?page=Blog&month=2011-11&post=Passive-OS-Fingerprinting
+    # https://jonathansblog.co.uk/os-detection-techniques
+    os_data_ttl_wwww = {
+        ("Linux (Kernel 2.4 and 2.6)", 64, 5840),
+        ("Linux (Kernel 2.4 and 2.6)", 64, 5792),
+        ("Linux (Ubuntu/RH/Centos)", 64, 14480),
+        ("HP LaseJet", 64, 11680),
+        ("Google Linux", 64, 5720),
+        ("FreeBSD", 64, 65535),
+        ("Raspbian", 64, 65160),
+        ("Windows XP", 128, 65535),
+        ("Windows Vista and 7 (Server 2008)", 128, 8192),
+        ("iOS 12.4 (Cisco Routers)", 255, 4128)
+    }
+    os_data_ttl = {
+        ("Linux", 64),
+        ("Windows", 128),
+        ("iOS 12.4 (Cisco Routers)", 255)
+    }
+    # Buscamos las coincidencias
+    if fingerestructure['ttl'] and fingerestructure['wwww']:
+        for ssoo, ttl, tcp_win_size in os_data_ttl_wwww:
+            if fingerestructure['ttl'] == "{:0>2X}".format(ttl) and fingerestructure['wwww'] == "{:0>4X}".format(tcp_win_size):
+                return ssoo
+    elif fingerestructure['ttl']:
+        for ssoo, ttl in os_data_ttl:
+            if fingerestructure['ttl'] == "{:0>2X}".format(ttl):
+                return ssoo
+    else:
+        return ""
 
 
 # Creamos un diccionario que mapea nombres de funciones a objetos de función
@@ -552,46 +810,11 @@ funciones = {
     "xmasscan": xmasscan,
     "finscan": finscan,
     "nullscan": nullscan,
-    "winscan": winscan,
-    "bannergrabbing": bannergrabbing
+    "winscan": winscan
 }
 
 # Definimos una función que selecciona y ejecuta una función en función del parámetro de entrada
 def seleccionar_funcion(nombre_funcion, parametros, hilos):
-    targets = parametros[0]
-    ports = parametros[1]
-    ifaz = parametros[2]
-    tout = parametros[3]
-
-    # Buscamos la función correspondiente en el diccionario
-    funcion = funciones.get(nombre_funcion)
-    #print(f"[!] la funcion elegida es {funcion.__name__}")
-    #print(f"[!] los objetivos son {targets}")
-    # Si la función existe, la ejecutamos
-    if funcion is not None:
-        if funcion.__name__ in ["arpping", "icmpping"]:
-            with tqdm(total=len(targets)) as pbar:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=hilos) as executor:
-                    futures = [executor.submit(funcion, ifaz, target, tout) for target in targets]
-                    for future in concurrent.futures.as_completed(futures):
-                        pbar.update(1)
-                        target = future.result()
-            #funcion()
-        else:
-            targets_ports = [(target, port) for target in targets for port in raw_ports]
-            total_works = len(targets_ports)
-            with tqdm(total=len(targets)*len(ports)) as pbar:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=hilos) as executor:
-                    futures = [executor.submit(funcion, target, port, tout) for target in targets for port in
-                               ports if target.getUP()]
-                    for future in concurrent.futures.as_completed(futures):
-                        pbar.update(1)
-                        target = future.result()
-            #funcion()
-    else:
-        print(f"La función {nombre_funcion} no existe")
-
-def seleccionar_funcion2(nombre_funcion, parametros, hilos):
     targets = parametros[0]
     ports = parametros[1]
     ifaz = parametros[2]
@@ -648,7 +871,7 @@ if __name__ == '__main__':
 
     ayuda = 'Programa para realizar un escaneo de la red local'
     parser = argparse.ArgumentParser(description=ayuda)
-    parser.add_argument("-p", "--port", help="puertos a escanear", default=22)
+    parser.add_argument("-p", "--port", help="puertos a escanear", default="22")
     parser.add_argument("--targets",
                         help="direccion a la que realizar el scaneo en formato CIDR:" + get_default_range(),
                         default=get_default_range())
@@ -661,28 +884,38 @@ if __name__ == '__main__':
                         default='arpping',
                         const='arpping',
                         nargs='?',
-                        choices=['arpping', 'icmpping', 'tcpping', 'udpping', 'tcpconnectscan', 'tcpstealthscan', 'ackscan', 'xmasscan', 'finscan', 'nullscan', 'winscan', 'bannergrabbing', 'all'],
+                        choices=['arpping', 'icmpping', 'tcpping', 'udpping', 'tcpconnectscan', 'tcpstealthscan', 'ackscan', 'xmasscan', 'finscan', 'nullscan', 'winscan'],
                         help='Tipo de escaneo (default: %(default)s)')
     parser.add_argument("--test", help="tipo de escaneo a ejecutar", default="arpscan", )
     # Se procesas los argumentos
     args = parser.parse_args()
     targets = set_targets(args.targets)
-    target_ports, raw_ports = set_ports(args.port, 'tcp')
+    raw_ports = set_ports(args.port)
+    scantype = args.scantype
     ifaz = args.interfaz
     tout = args.timeout
     hilos = args.hilos
-    scantype = args.scantype
 
     parametros=[targets, raw_ports, ifaz, tout]
 
-    seleccionar_funcion2(scantype, parametros, hilos)
-
+    seleccionar_funcion(scantype, parametros, hilos)
 
     for target in targets:
         if target.getUP():
-            target.setDown()
-            print("equipo {0}, MAC:{1}, ttl:{2} is UP".format(str(target.ip),str(target.mac),str(target.ttl)))
+            tabla_hosts = PrettyTable()
+            tabla_hosts.field_names = ["Equipo", "MAC", "TTL", "Arriba", "TTL:OS", "Firewalled"]
+            tabla_hosts.add_row([str(target.ip), str(target.mac), str(target.ttl), str(target.getUP()), str(":".join([str(target.idOS[key]) for key in ["ttl", "OS"]])), str(target.firewalled)])
+            print(tabla_hosts)
+            tabla_ports = PrettyTable()
+            tabla_ports.hrules = ALL
+            tabla_ports.field_names = ["Port", "Estado", "TTL", "MAC", "WWWW:MSS:TTL:WS:S:N:D:T:F:LEN:OS", "Banner"]
+            tabla_ports.max_width['Banner'] = 50
+            tabla_ports.align['Banner'] = 'l'
             for port in target.puertos:
-                print("\tIP:{0} - Port:{1} => {2}:{3}".format(str(target.ip), str(port.numero), str(port.estado), port.banner))
+                tabla_ports.add_row([int(port.numero), str(port.estado), str(port.ttl), str(port.mac), str(":".join([str(valor) for valor in port.idOS.values()])) ,str(port.banner).replace('\r','')])
 
-
+            tabla_ports.sortby = "Port"
+            #print(tabla_ports)
+            if len(target.puertos) > 0:
+                for linea in str((tabla_ports)).split('\n'):
+                    print('  ' + linea)
