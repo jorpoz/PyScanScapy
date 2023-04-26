@@ -13,6 +13,7 @@ from tqdm import tqdm
 from prettytable import PrettyTable, ALL
 logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 
+
 #clase equipo para almacenar los equipos que se encuentren
 class Equipo:
     def __init__(self, ip):
@@ -48,6 +49,7 @@ class Equipo:
         if not isinstance(value, ipaddress):
             raise TypeError("La ip debe ser un objeto de ipaddress")
         self._ip = value
+
 
 #clases tipo puerto para almacenar los puertos abiertos en un equipo
 class Puerto:
@@ -203,6 +205,7 @@ class Puerto:
             raise TypeError("El tipo debe ser un string")
         self._banner = value
 
+
 def get_interfaces():
     interfaces = []
     if 'win' in platform:
@@ -228,11 +231,23 @@ def get_work_interface():
     return (interfaz)
 
 
+def get_default_IP():
+    sip = get_if_addr(get_work_interface())
+    return sip
+
 def get_default_range():
     default_ip = get_if_addr(get_work_interface()) + "/24"
     rango = ipaddress.ip_network(default_ip, strict=False)
     return rango.exploded
 
+
+def set_source(ip):
+    try:
+        sip = ipaddress.ip_address(ip)
+        return sip
+    except ValueError:
+        print("Ups, algo fue mal con la IP Origen, revisa las IP proporcionada: {0}".format(ValueError))
+        exit(1)
 
 def set_targets(rango):
     """
@@ -300,7 +315,7 @@ def handler(signal, frame):
 
 
 # Definimos una serie de funciones para los escaneos
-def arpping(ifaz, target, tout):
+def arpping(ifaz, sip, target, tout):
     '''
     # Se emiten los paquetes a broadcast a traves de la interfaz indicada
     #print(
@@ -309,26 +324,31 @@ def arpping(ifaz, target, tout):
     #for target in targets:
     #print("se escanea el target:{0}".format(str(target.ip)))
     '''
-    ans = srp1(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=str(target.ip)), iface=ifaz, timeout=tout, verbose=0)
-    # ans.summary(lambda s,r: r.sprintf("%Ether.src% %ARP.psrc%") )
-    if ans is not None:
-        target.setUp()
-        target.mac = ans.hwsrc
-    return target
+    try:
+        ans = srp1(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=str(target.ip)), iface=ifaz, timeout=tout, verbose=0)
+        if ans is not None:
+            target.setUp()
+            target.mac = ans.hwsrc
+        return target
+    except Exception as e:
+        print("Ocurrió un error al enviar el paquete ARPping: %s" % e)
 
 
-def icmpping(ifaz, target, tout):
-    response = srp1(Ether()/IP(dst=str(target.ip))/ICMP(), iface=ifaz, timeout=tout, verbose=0)
-    if response is not None:
-        #print(f"[+] el equipo {str(target.ip)} esta arriba")
-        target.setUp()
-        target.ttl = response.ttl
-        target.mac = response.src
-        target.idOS = identificacionOS(response)
-    return target
+def icmpping(ifaz, sip, target, tout):
+    try:
+        response = srp1(Ether()/IP(src=str(sip), dst=str(target.ip))/ICMP(), iface=ifaz, timeout=tout, verbose=0)
+        if response is not None:
+            #print(f"[+] el equipo {str(target.ip)} esta arriba")
+            target.setUp()
+            target.ttl = response.ttl
+            target.mac = response.src
+            target.idOS = identificacionOS(response)
+        return target
+    except Exception as e:
+        print("Ocurrió un error al enviar el paquete ICMPping a {0}: {1}".format(str(target.ip), e))
 
 
-def tcpping(target, dst_port, tout):
+def tcpping(ifaz, sip, target, dst_port, tout):
     '''
     TCP Syn Scan (-sS).
     1. Syn->
@@ -340,73 +360,79 @@ def tcpping(target, dst_port, tout):
     :param tout:
     :return:
     '''
-    src_port = RandShort()._fix()
-    seq_num = random.randint(1, 1000000)
-    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
-    response = srp1(
-        Ether() / IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="S", seq=seq_num, options=tcp_options),
-        timeout=tout, verbose=0)
-    if response is not None:
-        if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x12:
-            send_rst = srp1(Ether() / IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="R", seq=seq_num + 2, ack=response.getlayer(TCP).seq + len(response.getlayer(TCP).payload) + 1), timeout=tout, verbose=0)
-            target.setUp()
-            new_port=Puerto(dst_port, 'tcp')
-            new_port.estado='open'
-            new_port.bannergrabbing(str(target.ip),tout)
-            new_port.ttl = response.ttl
-            new_port.mac = response.src
-            new_port.idOS = identificacionOS(response)
-            target.add_port(new_port)
-            target.ttl = response.ttl
-            target.mac = response.src
-        else:
-            # si esta cerrado se recibe un Rst=1, Ack=1 (0x14), win=0, len=0
-            pass
-    return target
+    try:
+        src_port = RandShort()._fix()
+        seq_num = random.randint(1, 1000000)
+        tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+        response = srp1(
+            Ether() / IP(src=str(sip), dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="S", seq=seq_num, options=tcp_options),
+            iface=ifaz, timeout=tout, verbose=0)
+        if response is not None:
+            if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x12:
+                send_rst = srp1(Ether() / IP(src=str(sip), dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="R", seq=seq_num + 2, ack=response.getlayer(TCP).seq + len(response.getlayer(TCP).payload) + 1), iface=ifaz, timeout=tout, verbose=0)
+                target.setUp()
+                new_port=Puerto(dst_port, 'tcp')
+                new_port.estado='open'
+                new_port.bannergrabbing(str(target.ip),tout)
+                new_port.ttl = response.ttl
+                new_port.mac = response.src
+                new_port.idOS = identificacionOS(response)
+                target.add_port(new_port)
+                target.ttl = response.ttl
+                target.mac = response.src
+            else:
+                # si esta cerrado se recibe un Rst=1, Ack=1 (0x14), win=0, len=0
+                pass
+        return target
+    except Exception as e:
+        print("Ocurrió un error al enviar el paquete TCPping a {0}: {1}".format(str(target.ip), e))
 
 
-def udpping(target, dst_port, tout):
-    src_port = RandShort()._fix()
-    response = srp1(Ether()/IP(dst=str(target.ip)) / UDP(sport=src_port, dport=dst_port), timeout=tout, verbose=0)
+def udpping(ifaz, sip, target, dst_port, tout):
+    try:
+        src_port = RandShort()._fix()
+        response = srp1(Ether()/IP(src=str(sip), dst=str(target.ip)) / UDP(sport=src_port, dport=dst_port), iface=ifaz, timeout=tout, verbose=0)
 
-    # Analiza la respuesta
-    if response is None:
-        new_port = Puerto(dst_port, 'udp')
-        new_port.estado = 'open/filtered'
-        target.add_port(new_port)
-        target.setUp()
-    elif response.haslayer(UDP):
-        new_port = Puerto(dst_port, 'udp')
-        new_port.estado = 'open'
-        new_port.ttl = response.ttl
-        new_port.mac = response.src
-        new_port.idOS = identificacionOS(response)
-        target.add_port(new_port)
-        target.setUp()
-        target.ttl = response.ttl
-        target.mac = response.src
-    elif response.haslayer(ICMP):
-        if (int(response.getlayer(ICMP).type) == 3) and int(response.getlayer(ICMP).code) == 3:
-            # puerto inalcanzable
-            pass
-        elif (int(response.getlayer(ICMP).type) == 3 and int(response.getlayer(ICMP).code) in [1, 2, 9, 10, 13]):
+        # Analiza la respuesta
+        if response is None:
             new_port = Puerto(dst_port, 'udp')
-            new_port.estado = 'filtered'
+            new_port.estado = 'open/filtered'
+            target.add_port(new_port)
+            target.setUp()
+        elif response.haslayer(UDP):
+            new_port = Puerto(dst_port, 'udp')
+            new_port.estado = 'open'
             new_port.ttl = response.ttl
             new_port.mac = response.src
             new_port.idOS = identificacionOS(response)
-            target.setUp()
             target.add_port(new_port)
+            target.setUp()
             target.ttl = response.ttl
             target.mac = response.src
-            if int(response.getlayer(ICMP).code) in [9, 10, 13]:
-                # The destination network is administratively prohibited,
-                # The destination host is administratively prohibited,
-                # Communication administratively prohibited
-                target.firewalled = True
+        elif response.haslayer(ICMP):
+            if (int(response.getlayer(ICMP).type) == 3) and int(response.getlayer(ICMP).code) == 3:
+                # puerto inalcanzable
+                pass
+            elif (int(response.getlayer(ICMP).type) == 3 and int(response.getlayer(ICMP).code) in [1, 2, 9, 10, 13]):
+                new_port = Puerto(dst_port, 'udp')
+                new_port.estado = 'filtered'
+                new_port.ttl = response.ttl
+                new_port.mac = response.src
+                new_port.idOS = identificacionOS(response)
+                target.setUp()
+                target.add_port(new_port)
+                target.ttl = response.ttl
+                target.mac = response.src
+                if int(response.getlayer(ICMP).code) in [9, 10, 13]:
+                    # The destination network is administratively prohibited,
+                    # The destination host is administratively prohibited,
+                    # Communication administratively prohibited
+                    target.firewalled = True
+    except Exception as e:
+        print("Ocurrió un error al enviar el paquete UDPping a {0}: {1}".format(str(target.ip), e))
 
 
-def tcpconnectscan(target, dst_port, tout):
+def tcpconnectscan(ifaz, sip, target, dst_port, tout):
     '''
     TCP Syn Scan (-sS).
     1. Syn->
@@ -420,32 +446,35 @@ def tcpconnectscan(target, dst_port, tout):
     :param tout:
     :return:
     '''
-    src_port = RandShort()._fix()
-    seq_num = random.randint(1, 1000000)
-    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="S", seq=seq_num, options=tcp_options), timeout=tout, verbose=0)
-    if(str(type(response))=="<class 'NoneType'>"):
-        pass
-    elif(response.haslayer(TCP)):
-        if(response.getlayer(TCP).flags == 0x12):
-            send_rst = srp1(Ether()/IP(dst=str(target.ip))/TCP(sport=src_port, dport=int(dst_port), flags="A", seq=seq_num + 1, ack=response.getlayer(TCP).seq + len(response.getlayer(TCP).payload) + 1), timeout=tout, verbose=0)
-            send_rst = srp1(Ether()/IP(dst=str(target.ip))/TCP(sport=src_port, dport=int(dst_port), flags="R", seq=seq_num + 2, ack=response.getlayer(TCP).seq + len(response.getlayer(TCP).payload) + 1), timeout=tout, verbose=0)
-            target.setUp()
-            new_port=Puerto(dst_port, 'tcp')
-            new_port.estado='open'
-            new_port.ttl = response.ttl
-            new_port.mac = response.src
-            new_port.idOS = identificacionOS(response)
-            new_port.bannergrabbing(str(target.ip), tout)
-            target.add_port(new_port)
-            target.ttl = response.ttl
-            target.mac = response.src
-        elif(response.getlayer(TCP).flags == 0x14):
+    try:
+        src_port = RandShort()._fix()
+        seq_num = random.randint(1, 1000000)
+        tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+        response = srp1(Ether()/IP(src=str(sip), dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="S", seq=seq_num, options=tcp_options), iface=ifaz, timeout=tout, verbose=0)
+        if(str(type(response))=="<class 'NoneType'>"):
             pass
-    return target
+        elif(response.haslayer(TCP)):
+            if(response.getlayer(TCP).flags == 0x12):
+                send_rst = srp1(Ether()/IP(src=str(sip), dst=str(target.ip))/TCP(sport=src_port, dport=int(dst_port), flags="A", seq=seq_num + 1, ack=response.getlayer(TCP).seq + len(response.getlayer(TCP).payload) + 1), iface=ifaz, timeout=tout, verbose=0)
+                send_rst = srp1(Ether()/IP(src=str(sip), dst=str(target.ip))/TCP(sport=src_port, dport=int(dst_port), flags="R", seq=seq_num + 2, ack=response.getlayer(TCP).seq + len(response.getlayer(TCP).payload) + 1), iface=ifaz, timeout=tout, verbose=0)
+                target.setUp()
+                new_port=Puerto(dst_port, 'tcp')
+                new_port.estado='open'
+                new_port.ttl = response.ttl
+                new_port.mac = response.src
+                new_port.idOS = identificacionOS(response)
+                new_port.bannergrabbing(str(target.ip), tout)
+                target.add_port(new_port)
+                target.ttl = response.ttl
+                target.mac = response.src
+            elif(response.getlayer(TCP).flags == 0x14):
+                pass
+        return target
+    except Exception as e:
+        print("Ocurrió un error al enviar el paquete tcpconnectscan a {0}: {1}".format(str(target.ip), e))
 
 
-def tcpstealthscan(target, dst_port, tout):
+def tcpstealthscan(ifaz, sip, target, dst_port, tout):
     '''
     Poca diferencia con el connect scan en cuanto intercambio de paquetes.
     En esta ocasion, si no se recibe respuesta o esta es un paquete icmp se clasifica el puerto como filtered
@@ -454,50 +483,54 @@ def tcpstealthscan(target, dst_port, tout):
     :param tout:
     :return:
     '''
-    src_port = RandShort()._fix()
-    seq_num = random.randint(1, 1000000)
-    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="S", seq=seq_num, options=tcp_options), timeout=tout, verbose=0)
-    if response is not None:
-        if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x12:
-            target.setUp()
-            new_port=Puerto(dst_port, 'tcp')
-            new_port.estado='open'
-            new_port.ttl = response.ttl
-            new_port.mac = response.src
-            new_port.idOS = identificacionOS(response)
-            new_port.bannergrabbing(str(target.ip), tout)
-            target.add_port(new_port)
-            target.ttl = response.ttl
-            target.mac = response.src
-            response_packet = srp1(Ether()/IP(dst=str(target.ip))/TCP(sport=src_port, dport=int(dst_port), flags="R", seq=seq_num + 1, ack=response.getlayer(TCP).seq + len(response.getlayer(TCP).payload) + 1), timeout=tout, verbose=0)
-        elif response.haslayer(TCP) and (response.getlayer(TCP).flags == 0x14):
-            #print(f"[+] stealthscan:Port {dst_port} is closed on {str(target.ip)}")
-            pass
-        elif response.haslayer(ICMP):
-            if(int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]):
-                new_port = Puerto(dst_port, 'tcp')
-                new_port.estado = 'filtered'
+    try:
+        src_port = RandShort()._fix()
+        seq_num = random.randint(1, 1000000)
+        tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+        response = srp1(Ether()/IP(src=str(sip), dst=str(target.ip)) / TCP(sport=src_port, dport=int(dst_port), flags="S", seq=seq_num, options=tcp_options), iface=ifaz, timeout=tout, verbose=0)
+        if response is not None:
+            if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x12:
+                target.setUp()
+                new_port=Puerto(dst_port, 'tcp')
+                new_port.estado='open'
                 new_port.ttl = response.ttl
                 new_port.mac = response.src
                 new_port.idOS = identificacionOS(response)
+                new_port.bannergrabbing(str(target.ip), tout)
                 target.add_port(new_port)
                 target.ttl = response.ttl
                 target.mac = response.src
-                if int(response.getlayer(ICMP).code) in [9, 10, 13]:
-                    # The destination network is administratively prohibited,
-                    # The destination host is administratively prohibited,
-                    # Communication administratively prohibited
-                    target.firewalled = True
-    else:
-        new_port=Puerto(dst_port, 'tcp')
-        new_port.estado='filtered'
-        target.add_port(new_port)
-        target.firewalled = True
-    return target
+                response_packet = srp1(Ether()/IP(src=str(sip), dst=str(target.ip))/TCP(sport=src_port, dport=int(dst_port), flags="R", seq=seq_num + 1, ack=response.getlayer(TCP).seq + len(response.getlayer(TCP).payload) + 1), iface=ifaz, timeout=tout, verbose=0)
+            elif response.haslayer(TCP) and (response.getlayer(TCP).flags == 0x14):
+                #print(f"[+] stealthscan:Port {dst_port} is closed on {str(target.ip)}")
+                pass
+            elif response.haslayer(ICMP):
+                if(int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]):
+                    new_port = Puerto(dst_port, 'tcp')
+                    new_port.estado = 'filtered'
+                    new_port.ttl = response.ttl
+                    new_port.mac = response.src
+                    new_port.idOS = identificacionOS(response)
+                    target.add_port(new_port)
+                    target.ttl = response.ttl
+                    target.mac = response.src
+                    if int(response.getlayer(ICMP).code) in [9, 10, 13]:
+                        # The destination network is administratively prohibited,
+                        # The destination host is administratively prohibited,
+                        # Communication administratively prohibited
+                        target.firewalled = True
+        else:
+            new_port=Puerto(dst_port, 'tcp')
+            new_port.estado='filtered'
+            target.add_port(new_port)
+            target.firewalled = True
+        return target
+    except Exception as e:
+        print("Ocurrió un error al enviar el paquete tcpstealthscan a {0}: {1}".format(str(target.ip), e))
 
 
-def ackscan(target, dst_port, tout):
+
+def ackscan(ifaz, sip, target, dst_port, tout):
     '''
     nmap -sA
     Se busca determinar si el objetivo está detras de un firewall
@@ -506,37 +539,40 @@ def ackscan(target, dst_port, tout):
     :param tout:
     :return:
     '''
-    src_port = RandShort()._fix()
-    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="A", options=tcp_options), timeout=tout, verbose=0)
-    if response is not None:
-        if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x4:
-            target.setUp()
-            target.ttl = response.ttl
-            target.mac = response.src
-            target.idOS = identificacionOS(response)
-            # El puerto no esá filtrado, pero no podemos decir si está abierto o cerrado.
-        elif response.haslayer(ICMP):
-            if (int(response.getlayer(ICMP).type) == 3 and int(response.getlayer(ICMP).code) in [1, 2, 3, 9, 10, 13]):
-                new_port = Puerto(dst_port, 'tcp')
-                new_port.estado = 'filtered'
-                new_port.ttl = response.ttl
-                new_port.mac = response.src
-                new_port.idOS = identificacionOS(response)
-                target.add_port(new_port)
-                target.firewalled = True
+    try:
+        src_port = RandShort()._fix()
+        tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+        response = srp1(Ether()/IP(src=str(sip), dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="A", options=tcp_options), iface=ifaz, timeout=tout, verbose=0)
+        if response is not None:
+            if response.haslayer(TCP) and response.getlayer(TCP).flags == 0x4:
+                target.setUp()
                 target.ttl = response.ttl
                 target.mac = response.src
-    else:
-        target.firewalled = True
-        new_port = Puerto(dst_port, 'tcp')
-        new_port.estado = 'filtered'
-        target.add_port(new_port)
-        #solo se mostrará este puerto si la maquina se determina UP por otro puerto.
-    return target
+                target.idOS = identificacionOS(response)
+                # El puerto no esá filtrado, pero no podemos decir si está abierto o cerrado.
+            elif response.haslayer(ICMP):
+                if (int(response.getlayer(ICMP).type) == 3 and int(response.getlayer(ICMP).code) in [1, 2, 3, 9, 10, 13]):
+                    new_port = Puerto(dst_port, 'tcp')
+                    new_port.estado = 'filtered'
+                    new_port.ttl = response.ttl
+                    new_port.mac = response.src
+                    new_port.idOS = identificacionOS(response)
+                    target.add_port(new_port)
+                    target.firewalled = True
+                    target.ttl = response.ttl
+                    target.mac = response.src
+        else:
+            target.firewalled = True
+            new_port = Puerto(dst_port, 'tcp')
+            new_port.estado = 'filtered'
+            target.add_port(new_port)
+            #solo se mostrará este puerto si la maquina se determina UP por otro puerto.
+        return target
+    except Exception as e:
+        print("Ocurrió un error al enviar el paquete ackscan a {0}: {1}".format(str(target.ip), e))
 
 
-def xmasscan(target, dst_port, tout):
+def xmasscan(ifaz, sip, target, dst_port, tout):
     '''
     nmap -sX
     :param target:
@@ -544,33 +580,36 @@ def xmasscan(target, dst_port, tout):
     :param tout:
     :return:
     '''
-    src_port = RandShort()._fix()
-    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="FPU", options=tcp_options), timeout=tout, verbose=0)
-    if response is None:
-        new_port = Puerto(dst_port, 'tcp')
-        new_port.estado = 'open/filtered'
-        target.add_port(new_port)
-    elif response.haslayer(TCP) and response.getlayer(TCP).flags == 0x14:
-        # Se supone que si el puerto está cerrado debería responder con un AR
-        target.setUp()
-        target.ttl = response.ttl
-        target.mac = response.src
-        target.idOS = identificacionOS(response)
-    elif response.haslayer(ICMP) and int(response.getlayer(ICMP).type)==3:
-        new_port = Puerto(dst_port, 'tcp')
-        new_port.estado = 'filtered'
-        new_port.ttl = response.ttl
-        new_port.mac = response.src
-        new_port.idOS = identificacionOS(response)
-        target.add_port(new_port)
-        target.setUp()
-        target.ttl = response.ttl
-        target.mac = response.src
-        target.firewalled = True
+    try:
+        src_port = RandShort()._fix()
+        tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+        response = srp1(Ether()/IP(src=str(sip), dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="FPU", options=tcp_options), iface=ifaz, timeout=tout, verbose=0)
+        if response is None:
+            new_port = Puerto(dst_port, 'tcp')
+            new_port.estado = 'open/filtered'
+            target.add_port(new_port)
+        elif response.haslayer(TCP) and response.getlayer(TCP).flags == 0x14:
+            # Se supone que si el puerto está cerrado debería responder con un AR
+            target.setUp()
+            target.ttl = response.ttl
+            target.mac = response.src
+            target.idOS = identificacionOS(response)
+        elif response.haslayer(ICMP) and int(response.getlayer(ICMP).type)==3:
+            new_port = Puerto(dst_port, 'tcp')
+            new_port.estado = 'filtered'
+            new_port.ttl = response.ttl
+            new_port.mac = response.src
+            new_port.idOS = identificacionOS(response)
+            target.add_port(new_port)
+            target.setUp()
+            target.ttl = response.ttl
+            target.mac = response.src
+            target.firewalled = True
+    except Exception as e:
+        print("Ocurrió un error al enviar el paquete xmasscan a {0}: {1}".format(str(target.ip), e))
 
 
-def finscan(target, dst_port, tout):
+def finscan(ifaz, sip, target, dst_port, tout):
     '''
     nmap -sF
     :param target:
@@ -578,33 +617,36 @@ def finscan(target, dst_port, tout):
     :param tout:
     :return:
     '''
-    src_port = RandShort()._fix()
-    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="F",options=tcp_options), timeout=tout, verbose=0)
-    if response is None:
-        new_port = Puerto(dst_port, 'tcp')
-        new_port.estado = 'open/filtered'
-        target.add_port(new_port)
-    elif response.haslayer(TCP) and response.getlayer(TCP).flags == 0x14:
-            target.setUp()
-            target.ttl = response.ttl
-            target.mac = response.src
-            target.idOS = identificacionOS(response)
-    elif response.haslayer(ICMP):
-        if int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]:
-            target.setUp()
-            new_port=Puerto(dst_port, 'tcp')
-            new_port.estado='filtered'
-            new_port.ttl = response.ttl
-            new_port.mac = response.src
-            new_port.idOS = identificacionOS(response)
+    try:
+        src_port = RandShort()._fix()
+        tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+        response = srp1(Ether()/IP(src=str(sip), dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="F",options=tcp_options), iface=ifaz, timeout=tout, verbose=0)
+        if response is None:
+            new_port = Puerto(dst_port, 'tcp')
+            new_port.estado = 'open/filtered'
             target.add_port(new_port)
-            target.ttl = response.ttl
-            target.mac = response.src
-            target.firewalled = True
+        elif response.haslayer(TCP) and response.getlayer(TCP).flags == 0x14:
+                target.setUp()
+                target.ttl = response.ttl
+                target.mac = response.src
+                target.idOS = identificacionOS(response)
+        elif response.haslayer(ICMP):
+            if int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]:
+                target.setUp()
+                new_port=Puerto(dst_port, 'tcp')
+                new_port.estado='filtered'
+                new_port.ttl = response.ttl
+                new_port.mac = response.src
+                new_port.idOS = identificacionOS(response)
+                target.add_port(new_port)
+                target.ttl = response.ttl
+                target.mac = response.src
+                target.firewalled = True
+    except Exception as e:
+        print("Ocurrió un error al enviar el paquete finscan a {0}: {1}".format(str(target.ip), e))
 
 
-def nullscan(target, dst_port, tout):
+def nullscan(ifaz, sip, target, dst_port, tout):
     '''
     nmap -sN
     :param target:
@@ -612,33 +654,36 @@ def nullscan(target, dst_port, tout):
     :param tout:
     :return:
     '''
-    src_port = RandShort()._fix()
-    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags=0x00, options=tcp_options), timeout=tout, verbose=0)
-    if response is None:
-        new_port = Puerto(dst_port, 'tcp')
-        new_port.estado = 'open/filtered'
-        target.add_port(new_port)
-    elif response.haslayer(TCP) and response.getlayer(TCP).flags == 0x14:
-            target.setUp()
-            target.ttl = response.ttl
-            target.mac = response.src
-            target.idOS = identificacionOS(response)
-    elif response.haslayer(ICMP):
-        if int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]:
-            target.setUp()
-            new_port=Puerto(dst_port, 'tcp')
-            new_port.estado='filtered'
-            new_port.ttl = response.ttl
-            new_port.mac = response.src
-            new_port.idOS = identificacionOS(response)
+    try:
+        src_port = RandShort()._fix()
+        tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+        response = srp1(Ether()/IP(src=str(sip), dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags=0x00, options=tcp_options), iface=ifaz, timeout=tout, verbose=0)
+        if response is None:
+            new_port = Puerto(dst_port, 'tcp')
+            new_port.estado = 'open/filtered'
             target.add_port(new_port)
-            target.ttl = response.ttl
-            target.mac = response.src
-            target.firewalled = True
+        elif response.haslayer(TCP) and response.getlayer(TCP).flags == 0x14:
+                target.setUp()
+                target.ttl = response.ttl
+                target.mac = response.src
+                target.idOS = identificacionOS(response)
+        elif response.haslayer(ICMP):
+            if int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]:
+                target.setUp()
+                new_port=Puerto(dst_port, 'tcp')
+                new_port.estado='filtered'
+                new_port.ttl = response.ttl
+                new_port.mac = response.src
+                new_port.idOS = identificacionOS(response)
+                target.add_port(new_port)
+                target.ttl = response.ttl
+                target.mac = response.src
+                target.firewalled = True
+    except Exception as e:
+        print("Ocurrió un error al enviar el paquete nullscan a {0}: {1}".format(str(target.ip), e))
 
 
-def winscan(target, dst_port, tout):
+def winscan(ifaz, sip, target, dst_port, tout):
     '''
     nmap -sW
     :param target:
@@ -646,44 +691,47 @@ def winscan(target, dst_port, tout):
     :param tout:
     :return:
     '''
-    src_port = RandShort()._fix()
-    tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
-    response = srp1(Ether()/IP(dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="A", options=tcp_options), timeout=tout, verbose=0)
-    if response is None:
-        target.firewalled = True
-        new_port = Puerto(dst_port, 'tcp')
-        new_port.estado = 'filtered'
-        target.add_port(new_port)
-    elif response.haslayer(TCP):
-        if response.getlayer(TCP).window == 0:
-            target.setUp()
-            target.ttl = response.ttl
-            target.mac = response.src
-            target.idOS = identificacionOS(response)
-            pass
-        elif response.getlayer(TCP).window > 0:
-            target.setUp()
-            new_port = Puerto(dst_port, 'tcp')
-            new_port.estado = 'open'
-            new_port.ttl = response.ttl
-            new_port.mac = response.src
-            new_port.idOS = identificacionOS(response)
-            new_port.bannergrabbing(str(target.ip), tout)
-            target.add_port(new_port)
-            target.ttl = response.ttl
-            target.mac = response.src
-    elif response.haslayer(ICMP):
-        if int(response.getlayer(ICMP).type) == 3 and int(response.getlayer(ICMP).code) in [1, 2, 3, 9, 10, 13]:
-            target.setUp()
-            new_port=Puerto(dst_port, 'tcp')
-            new_port.estado='filtered'
-            new_port.ttl = response.ttl
-            new_port.mac = response.src
-            new_port.idOS = identificacionOS(response)
-            target.add_port(new_port)
-            target.ttl = response.ttl
-            target.mac = response.src
+    try:
+        src_port = RandShort()._fix()
+        tcp_options = [('MSS', 1460), ('SAckOK', ''), ('NOP', None), ('Timestamp', (123, 0)), ('WScale', 7)]
+        response = srp1(Ether()/IP(src=str(sip), dst=str(target.ip)) / TCP(sport=src_port, dport=dst_port, flags="A", options=tcp_options), iface=ifaz, timeout=tout, verbose=0)
+        if response is None:
             target.firewalled = True
+            new_port = Puerto(dst_port, 'tcp')
+            new_port.estado = 'filtered'
+            target.add_port(new_port)
+        elif response.haslayer(TCP):
+            if response.getlayer(TCP).window == 0:
+                target.setUp()
+                target.ttl = response.ttl
+                target.mac = response.src
+                target.idOS = identificacionOS(response)
+                pass
+            elif response.getlayer(TCP).window > 0:
+                target.setUp()
+                new_port = Puerto(dst_port, 'tcp')
+                new_port.estado = 'open'
+                new_port.ttl = response.ttl
+                new_port.mac = response.src
+                new_port.idOS = identificacionOS(response)
+                new_port.bannergrabbing(str(target.ip), tout)
+                target.add_port(new_port)
+                target.ttl = response.ttl
+                target.mac = response.src
+        elif response.haslayer(ICMP):
+            if int(response.getlayer(ICMP).type) == 3 and int(response.getlayer(ICMP).code) in [1, 2, 3, 9, 10, 13]:
+                target.setUp()
+                new_port=Puerto(dst_port, 'tcp')
+                new_port.estado='filtered'
+                new_port.ttl = response.ttl
+                new_port.mac = response.src
+                new_port.idOS = identificacionOS(response)
+                target.add_port(new_port)
+                target.ttl = response.ttl
+                target.mac = response.src
+                target.firewalled = True
+    except Exception as e:
+        print("Ocurrió un error al enviar el paquete winscan a {0}: {1}".format(str(target.ip), e))
 
 
 def identificacionOS(response):
@@ -826,7 +874,8 @@ def seleccionar_funcion(nombre_funcion, parametros, hilos):
     targets = parametros[0]
     ports = parametros[1]
     ifaz = parametros[2]
-    tout = parametros[3]
+    sip = parametros[3]
+    tout = parametros[4]
 
     # Buscamos la función correspondiente en el diccionario
     funcion = funciones.get(nombre_funcion)
@@ -835,7 +884,7 @@ def seleccionar_funcion(nombre_funcion, parametros, hilos):
             with tqdm(total=len(targets)) as pbar:
                 threads = []
                 for i, target in enumerate(targets):
-                    thread = threading.Thread(target=funcion, args=(ifaz, target, tout))
+                    thread = threading.Thread(target=funcion, args=(ifaz, sip, target, tout))
                     thread.start()
                     threads.append(thread)
                     if (i + 1) % hilos == 0:
@@ -848,7 +897,7 @@ def seleccionar_funcion(nombre_funcion, parametros, hilos):
             with tqdm(total=len(targets)*len(ports)) as pbar:
                 threads = []
                 for i, target_port in enumerate(targets_ports):
-                    thread = threading.Thread(target=funcion, args=(target_port[0], target_port[1], tout))
+                    thread = threading.Thread(target=funcion, args=(ifaz, sip, target_port[0], target_port[1], tout))
                     thread.start()
                     threads.append(thread)
                     if (i + 1) % hilos == 0:
@@ -876,7 +925,6 @@ def salida(targets):
                 tabla_ports.add_row([int(port.numero), str(port.estado), str(port.ttl), str(port.mac), str(":".join([str(valor) for valor in port.idOS.values()])) ,str(port.banner).replace('\r','')])
 
             tabla_ports.sortby = "Port"
-            #print(tabla_ports)
             if len(target.puertos) > 0:
                 for linea in str((tabla_ports)).split('\n'):
                     print('  ' + linea)
@@ -893,6 +941,7 @@ if __name__ == '__main__':
                         default=get_default_range())
     parser.add_argument("-i", "--interfaz", help="Interfaz por la que hacer el escaneo", choices=get_interfaces(),
                         default=get_work_interface())
+    parser.add_argument("-s", "--source", help="IP origen a utilizar:" + get_default_IP(), default=get_default_IP())
     parser.add_argument("--timeout", help="Tiempo de espera para la recepcion de las respuestas: ", type=int,
                         default=5)
     parser.add_argument("-H", "--hilos", help="numero de hilos", type=int, default=1280)
@@ -903,16 +952,17 @@ if __name__ == '__main__':
                         choices=['arpping', 'icmpping', 'tcpping', 'udpping', 'tcpconnectscan', 'tcpstealthscan', 'ackscan', 'xmasscan', 'finscan', 'nullscan', 'winscan'],
                         help='Tipo de escaneo (default: %(default)s)')
 
-    # Se procesas los argumentos
+    # Se procesan los argumentos
     args = parser.parse_args()
     targets = set_targets(args.targets)
     raw_ports = set_ports(args.port)
     scantype = args.scantype
     ifaz = args.interfaz
+    sip = set_source(args.source)
     tout = args.timeout
     hilos = args.hilos
 
-    parametros = [targets, raw_ports, ifaz, tout]
+    parametros = [targets, raw_ports, ifaz, sip, tout]
 
     seleccionar_funcion(scantype, parametros, hilos)
 
