@@ -1,4 +1,3 @@
-# This is a sample Python script.
 import argparse
 import ipaddress
 import logging
@@ -181,8 +180,8 @@ class Puerto:
     def tipo(self, value):
         if not isinstance(value, str):
             raise TypeError("El tipo debe ser un string")
-        if value not in ["tcp", "udp", "stcp"]:
-            raise TypeError("el valor debe ser tcp, udp o stcp")
+        if value not in ["tcp", "udp", "sctp"]:
+            raise TypeError("el valor debe ser tcp, udp o sctp")
         self._tipo = value
 
     @property
@@ -300,12 +299,15 @@ def set_ports(rango_puertos):
             if '-' in i:
                 puerto_inicial = 1 if i.split('-')[0] == '' else i.split('-')[0]
                 puerto_final = 65535 if i.split('-')[1] == '' else i.split('-')[1]
-                for puerto in range(int(puerto_inicial),int(puerto_final)+1):
-                    raw_ports.add(puerto)
+                for port in range(int(puerto_inicial),int(puerto_final)+1):
+                    Puerto(int(port), 'tcp') # comprobamos que el valor del puerto es valido
+                    raw_ports.add(port)
             else:
+                Puerto(int(i), 'tcp') # comprobamos que el valor del puerto es valido
                 raw_ports.add(int(i))
-    except:
-        print("Ups, algo fue mal con los puertos. Revisalos e intentalo de nuevo...")
+    except Exception as e:
+        print("Ups, algo fue mal con los puertos. Revisalos e intentalo de nuevo...{0}".format(e))
+        exit(1)
     return raw_ports
 
 
@@ -892,6 +894,9 @@ def seleccionar_funcion(nombre_funcion, parametros, hilos):
                             pbar.update(1)
                             thread.join()
                         threads = []
+                for thread in threads:
+                    pbar.update(1)
+                    thread.join()
         else:
             targets_ports = [(target, port) for target in targets for port in raw_ports]
             with tqdm(total=len(targets)*len(ports)) as pbar:
@@ -905,6 +910,10 @@ def seleccionar_funcion(nombre_funcion, parametros, hilos):
                             pbar.update(1)
                             thread.join()
                         threads = []
+                # Espera a que todos los hilos terminen
+                for thread in threads:
+                    pbar.update(1)
+                    thread.join()
 
     else:
         print(f"La función {nombre_funcion} no existe")
@@ -944,7 +953,7 @@ if __name__ == '__main__':
     parser.add_argument("-s", "--source", help="IP origen a utilizar:" + get_default_IP(), default=get_default_IP())
     parser.add_argument("--timeout", help="Tiempo de espera para la recepcion de las respuestas: ", type=int,
                         default=5)
-    parser.add_argument("-H", "--hilos", help="numero de hilos", type=int, default=1280)
+    parser.add_argument("-H", "--hilos", help="numero de hilos", type=int, default=200)
     parser.add_argument('--scantype',
                         default='arpping',
                         const='arpping',
