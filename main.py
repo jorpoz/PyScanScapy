@@ -319,12 +319,8 @@ def handler(signal, frame):
 # Definimos una serie de funciones para los escaneos
 def arpping(ifaz, sip, target, tout):
     '''
-    # Se emiten los paquetes a broadcast a traves de la interfaz indicada
-    #print(
-    #    'Se emiten paquetes ARP a traves de la interfaz {0} preguntando su dominio de broadcast por las IP solicitadas '
-    #    .format(ifaz))
-    #for target in targets:
-    #print("se escanea el target:{0}".format(str(target.ip)))
+    Se emiten los paquetes a broadcast a traves de la interfaz indicada
+    Se guarda la MAC y la IP en la maquina
     '''
     try:
         ans = srp1(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=str(target.ip)), iface=ifaz, timeout=tout, verbose=0)
@@ -337,6 +333,16 @@ def arpping(ifaz, sip, target, tout):
 
 
 def icmpping(ifaz, sip, target, tout):
+    '''
+    icmp Scan.
+    1. Echo Request->
+    2. <-Echo Reply
+    :param ifaz:
+    :param sip:
+    :param target:
+    :param tout:
+    :return:
+    '''
     try:
         response = srp1(Ether()/IP(src=str(sip), dst=str(target.ip))/ICMP(), iface=ifaz, timeout=tout, verbose=0)
         if response is not None:
@@ -352,13 +358,13 @@ def icmpping(ifaz, sip, target, tout):
 
 def tcpping(ifaz, sip, target, dst_port, tout):
     '''
-    TCP Syn Scan (-sS).
+    TCP Syn Scan.
     1. Syn->
     2. <-Syn+Ack
-    3. Rst->
-    Verificado con wireshark y nmap
+    3. RST ->
+    :param ifaz:
+    :param sip:
     :param target:
-    :param dst_port:
     :param tout:
     :return:
     '''
@@ -391,6 +397,16 @@ def tcpping(ifaz, sip, target, dst_port, tout):
 
 
 def udpping(ifaz, sip, target, dst_port, tout):
+    '''
+    UDP Scan
+    1. UDP->
+    2. <-UDO
+    :param ifaz:
+    :param sip:
+    :param target:
+    :param tout:
+    :return:
+    '''
     try:
         src_port = RandShort()._fix()
         response = srp1(Ether()/IP(src=str(sip), dst=str(target.ip)) / UDP(sport=src_port, dport=dst_port), iface=ifaz, timeout=tout, verbose=0)
@@ -436,15 +452,16 @@ def udpping(ifaz, sip, target, dst_port, tout):
 
 def tcpconnectscan(ifaz, sip, target, dst_port, tout):
     '''
-    TCP Syn Scan (-sS).
+    TCP Connect Scan.
     1. Syn->
     2. <-Syn+Ack
     3. Ack->
     4. Rst->
     Tenemos el problema de que el SSOO manda el Rst antes de que nosotros mandemos el Ack y luego el Rst.
     Para determinar el estado del puerto es transparente
+    :param ifaz:
+    :param sip:
     :param target:
-    :param dst_port:
     :param tout:
     :return:
     '''
@@ -478,10 +495,13 @@ def tcpconnectscan(ifaz, sip, target, dst_port, tout):
 
 def tcpstealthscan(ifaz, sip, target, dst_port, tout):
     '''
-    Poca diferencia con el connect scan en cuanto intercambio de paquetes.
-    En esta ocasion, si no se recibe respuesta o esta es un paquete icmp se clasifica el puerto como filtered
+    TCP Syn Scan.
+    1. Syn->
+    2. <-Syn+Ack
+    3. Rst->
+    :param ifaz:
+    :param sip:
     :param target:
-    :param dst_port:
     :param tout:
     :return:
     '''
@@ -504,7 +524,7 @@ def tcpstealthscan(ifaz, sip, target, dst_port, tout):
                 target.mac = response.src
                 response_packet = srp1(Ether()/IP(src=str(sip), dst=str(target.ip))/TCP(sport=src_port, dport=int(dst_port), flags="R", seq=seq_num + 1, ack=response.getlayer(TCP).seq + len(response.getlayer(TCP).payload) + 1), iface=ifaz, timeout=tout, verbose=0)
             elif response.haslayer(TCP) and (response.getlayer(TCP).flags == 0x14):
-                #print(f"[+] stealthscan:Port {dst_port} is closed on {str(target.ip)}")
+                # Puerto cerrado
                 pass
             elif response.haslayer(ICMP):
                 if(int(response.getlayer(ICMP).type)==3 and int(response.getlayer(ICMP).code) in [1,2,3,9,10,13]):
@@ -534,10 +554,12 @@ def tcpstealthscan(ifaz, sip, target, dst_port, tout):
 
 def ackscan(ifaz, sip, target, dst_port, tout):
     '''
-    nmap -sA
     Se busca determinar si el objetivo está detras de un firewall
+    1. ACK->
+    2. <-RST/ICMP
+    :param ifaz:
+    :param sip:
     :param target:
-    :param dst_port:
     :param tout:
     :return:
     '''
@@ -576,9 +598,11 @@ def ackscan(ifaz, sip, target, dst_port, tout):
 
 def xmasscan(ifaz, sip, target, dst_port, tout):
     '''
-    nmap -sX
+    1. FIN,PUSH,URG->
+    2. <-RST/ICMP
+    :param ifaz:
+    :param sip:
     :param target:
-    :param dst_port:
     :param tout:
     :return:
     '''
@@ -613,9 +637,11 @@ def xmasscan(ifaz, sip, target, dst_port, tout):
 
 def finscan(ifaz, sip, target, dst_port, tout):
     '''
-    nmap -sF
+    1. FIN ->
+    2. <-RST/ICMP
+    :param ifaz:
+    :param sip:
     :param target:
-    :param dst_port:
     :param tout:
     :return:
     '''
@@ -650,9 +676,11 @@ def finscan(ifaz, sip, target, dst_port, tout):
 
 def nullscan(ifaz, sip, target, dst_port, tout):
     '''
-    nmap -sN
+    1. 0x00->
+    2. <-RST/ICMP
+    :param ifaz:
+    :param sip:
     :param target:
-    :param dst_port:
     :param tout:
     :return:
     '''
@@ -687,9 +715,12 @@ def nullscan(ifaz, sip, target, dst_port, tout):
 
 def winscan(ifaz, sip, target, dst_port, tout):
     '''
-    nmap -sW
+
+    1. ACK->
+    2. <-RST/ICMP
+    :param ifaz:
+    :param sip:
     :param target:
-    :param dst_port:
     :param tout:
     :return:
     '''
@@ -835,7 +866,8 @@ def getOS(fingerestructure):
         ("Raspbian", 64, 65160),
         ("Windows XP", 128, 65535),
         ("Windows XP", 128, 64240),
-        ("Windows Vista and 7 (Server 2008)", 128, 8192),
+        #("Windows Vista and 7 (Server 2008)", 128, 8192),
+        ("Win.Vista & 7", 128, 8192),
         ("iOS 12.4 (Cisco Routers)", 255, 4128)
     }
     os_data_ttl = {
@@ -944,20 +976,18 @@ if __name__ == '__main__':
 
     ayuda = 'Programa para realizar un escaneo de la red local'
     parser = argparse.ArgumentParser(description=ayuda)
-    parser.add_argument("-p", "--port", help="puertos a escanear", default="22")
+    parser.add_argument("-p", "--port", help="puertos a escanear, (default: %(default)s)", default="22")
     parser.add_argument("--targets",
                         help="direccion a la que realizar el scaneo en formato CIDR:" + get_default_range(),
                         default=get_default_range())
-    parser.add_argument("-i", "--interfaz", help="Interfaz por la que hacer el escaneo", choices=get_interfaces(),
+    parser.add_argument("-i", "--interfaz", help="Interfaz por la que hacer el escaneo, (default: %(default)s)", choices=get_interfaces(),
                         default=get_work_interface())
-    parser.add_argument("-s", "--source", help="IP origen a utilizar:" + get_default_IP(), default=get_default_IP())
-    parser.add_argument("--timeout", help="Tiempo de espera para la recepcion de las respuestas: ", type=int,
+    parser.add_argument("-s", "--source", help="IP origen a utilizar, (default: %(default)s)", default=get_default_IP())
+    parser.add_argument("--timeout", help="Tiempo de espera para la recepcion de las respuestas, (default: %(default)s): ", type=int,
                         default=5)
-    parser.add_argument("-H", "--hilos", help="numero de hilos", type=int, default=200)
+    parser.add_argument("-H", "--hilos", help="numero de hilos, (default: %(default)s)", type=int, default=200)
     parser.add_argument('--scantype',
                         default='arpping',
-                        const='arpping',
-                        nargs='?',
                         choices=['arpping', 'icmpping', 'tcpping', 'udpping', 'tcpconnectscan', 'tcpstealthscan', 'ackscan', 'xmasscan', 'finscan', 'nullscan', 'winscan'],
                         help='Tipo de escaneo (default: %(default)s)')
 
@@ -972,7 +1002,7 @@ if __name__ == '__main__':
     hilos = args.hilos
 
     parametros = [targets, raw_ports, ifaz, sip, tout]
-
+    # se llama a la funcion para lanzar el escaneo
     seleccionar_funcion(scantype, parametros, hilos)
-
+    # se muestra la salida
     salida(targets)
